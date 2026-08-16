@@ -1,0 +1,27 @@
+{
+  "name": "sunnex-crypto",
+  "version": "0.1.0",
+  "description": "Sunnex Crypto — Telegram trading signal bot for Binance/Bybit. Phase 1: signals + alerts only, no auto-trading.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "backtest": "node src/backtest/run.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "express": "^4.19.2",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3",
+    "ccxt": "^4.4.0",
+    "winston": "^3.14.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
