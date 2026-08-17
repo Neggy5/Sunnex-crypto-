@@ -28,45 +28,15 @@ const SPREAD_LIMIT_PIPS = numEnv('SPREAD_LIMIT_PIPS', 3);
  */
 async function evaluatePair(exchangeName, pair, timeframes) {
   const price = await exchange.getPrice(exchangeName, pair);
-  const candlesByTf = {};
-  for (const tf of timeframes) {
-    candlesByTf[tf] = await exchange.getCandles(exchangeName, pair, tf, 200);
-  }
-  return evaluateFromCandles({ exchangeName, pair, timeframes, candlesByTf, price });
-}
+  const spreadPips = ((price.ask - price.bid) / price.bid) * 10000;
 
-/**
- * Evaluate a signal using supplied candles instead of live market data.
- * This is deliberately separate from order execution: it can never place a trade.
- */
-function evaluateFromCandles({
-  exchangeName = 'backtest',
-  pair,
-  timeframes,
-  candlesByTf,
-  price,
-  skipSpreadCheck = false,
-}) {
-  if (!pair) throw new Error('pair is required');
-  if (!Array.isArray(timeframes) || !timeframes.length) throw new Error('timeframes are required');
-
-  const safePrice = price || (() => {
-    const c = candlesByTf?.[timeframes[0]]?.at(-1);
-    if (!c) throw new Error(`No candles supplied for ${timeframes[0]}`);
-    return { bid: c.close, ask: c.close, timestamp: c.time };
-  })();
-
-  const spreadPips = safePrice.bid ? ((safePrice.ask - safePrice.bid) / safePrice.bid) * 10000 : 0;
-  if (!skipSpreadCheck && spreadPips > SPREAD_LIMIT_PIPS) {
-    return noTrade(exchangeName, pair, `Spread too wide (${spreadPips.toFixed(1)} pips > ${SPREAD_LIMIT_PIPS})`, null, 0);
+  if (spreadPips > SPREAD_LIMIT_PIPS) {
+    return noTrade(exchangeName, pair, `Spread too wide (${spreadPips.toFixed(1)} pips > ${SPREAD_LIMIT_PIPS})`);
   }
 
   const perTf = {};
   for (const tf of timeframes) {
-    const candles = candlesByTf?.[tf];
-    if (!Array.isArray(candles) || candles.length < 30) {
-      return noTrade(exchangeName, pair, `${tf}: not enough candles (${candles?.length || 0}; need at least 30)`);
-    }
+    const candles = await exchange.getCandles(exchangeName, pair, tf, 200);
     const trend = analysis.detectTrend(candles);
     const sr = analysis.findSupportResistance(candles);
     const breakout = analysis.detectBreakout(candles, sr);
@@ -77,18 +47,15 @@ function evaluateFromCandles({
 
   const { score, direction, reasons, scoreDetail } = scoreConfluence(perTf, timeframes);
 
-  if (direction === 'NONE') {
-    return noTrade(exchangeName, pair, reasons.join('; ') || 'No directional confluence', scoreDetail, score);
-  }
-  if (score < MIN_SIGNAL_SCORE) {
-    return noTrade(exchangeName, pair, `Score ${score} below minimum ${MIN_SIGNAL_SCORE} (${direction} candidate)`, scoreDetail, score);
+  if (score < MIN_SIGNAL_SCORE || direction === 'NONE') {
+    return noTrade(exchangeName, pair, reasons.join('; ') || 'Insufficient confluence', scoreDetail, score);
   }
 
   const entryTf = perTf[timeframes[0]];
-  const { stopLoss, takeProfit, riskReward } = buildSlTp(entryTf, direction, safePrice);
+  const { stopLoss, takeProfit, riskReward } = buildSlTp(entryTf, direction, price);
 
-  if (!Number.isFinite(riskReward) || riskReward < MIN_RR) {
-    return noTrade(exchangeName, pair, `R:R ${Number.isFinite(riskReward) ? riskReward.toFixed(2) : 'invalid'} below minimum ${MIN_RR} (${direction} score ${score})`, scoreDetail, score);
+  if (riskReward < MIN_RR) {
+    return noTrade(exchangeName, pair, `R:R ${riskReward.toFixed(2)} below minimum ${MIN_RR}`, scoreDetail, score);
   }
 
   return {
@@ -97,30 +64,16 @@ function evaluateFromCandles({
     timeframe: timeframes[0],
     direction,
     confidence: score,
-    entryZoneLow: Math.min(safePrice.bid, safePrice.ask),
-    entryZoneHigh: Math.max(safePrice.bid, safePrice.ask),
+    entryZoneLow: Math.min(price.bid, price.ask),
+    entryZoneHigh: Math.max(price.bid, price.ask),
     stopLoss,
     takeProfit,
     riskReward,
     reasoning: reasons.length ? reasons.join('; ') : 'Directional confluence from weighted factor scoring — see breakdown',
-    marketContext: { spreadPips, evaluatedTimeframes: timeframes, backtest: exchangeName === 'backtest' },
+    marketContext: { spreadPips, evaluatedTimeframes: timeframes },
     scoreDetail,
     minSignalScore: MIN_SIGNAL_SCORE,
   };
-}
-
-/** Evaluate a historical candle snapshot. No exchange calls and no trading. */
-function evaluateHistorical({ pair, timeframes, candlesByTf }) {
-  const base = candlesByTf?.[timeframes[0]]?.at(-1);
-  if (!base) throw new Error(`No historical ${timeframes[0]} candle supplied`);
-  return evaluateFromCandles({
-    exchangeName: 'backtest',
-    pair,
-    timeframes,
-    candlesByTf,
-    price: { bid: base.close, ask: base.close, timestamp: base.time },
-    skipSpreadCheck: true,
-  });
 }
 
 function scoreConfluence(perTf, timeframes) {
@@ -247,4 +200,4 @@ function noTrade(exchangeName, pair, reason, scoreDetail = null, score = 0) {
   };
 }
 
-module.exports = { evaluatePair, evaluateFromCandles, evaluateHistorical, scoreConfluence, buildSlTp };
+module.exports = { evaluatePair };
