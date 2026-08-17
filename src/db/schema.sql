@@ -38,3 +38,24 @@ CREATE TABLE IF NOT EXISTS bot_state (
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 -- e.g. row: ('paused', '{"value": false}')
+
+-- Real trades placed on MT5 via MetaApi, one row per position. Linked back
+-- to the signal that suggested it so /stats can eventually cover live P&L.
+CREATE TABLE IF NOT EXISTS mt5_trades (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id       INTEGER REFERENCES signals(id),
+    ticket          TEXT,
+    mt5_symbol      TEXT NOT NULL,
+    direction       TEXT NOT NULL CHECK (direction IN ('BUY', 'SELL')),
+    lot_size        REAL NOT NULL,
+    open_price      REAL,
+    stop_loss       REAL,
+    take_profit     REAL,
+    status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed', 'failed')),
+    pnl             REAL,
+    opened_by       TEXT,
+    opened_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mt5_trades_status ON mt5_trades (status, opened_at DESC);

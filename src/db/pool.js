@@ -84,6 +84,64 @@ async function getBotState(key, fallback = null) {
   return row ? JSON.parse(row.value) : fallback;
 }
 
+async function insertMt5Trade(trade) {
+  const {
+    signalId, ticket, mt5Symbol, direction, lotSize,
+    openPrice, stopLoss, takeProfit, openedBy,
+  } = trade;
+  const n = (v) => (v === undefined ? null : v);
+
+  const stmt = db.prepare(
+    `INSERT INTO mt5_trades
+      (signal_id, ticket, mt5_symbol, direction, lot_size, open_price, stop_loss, take_profit, opened_by)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  );
+  const info = stmt.run(
+    n(signalId), n(ticket), mt5Symbol, direction, lotSize,
+    n(openPrice), n(stopLoss), n(takeProfit), n(openedBy),
+  );
+  return info.lastInsertRowid;
+}
+
+async function closeMt5Trade(id, pnl) {
+  db.prepare(
+    `UPDATE mt5_trades SET status = 'closed', pnl = ?, closed_at = datetime('now') WHERE id = ?`,
+  ).run(pnl, id);
+}
+
+async function failMt5Trade(id) {
+  db.prepare(`UPDATE mt5_trades SET status = 'failed' WHERE id = ?`).run(id);
+}
+
+async function getOpenMt5Trades() {
+  return db.prepare(`SELECT * FROM mt5_trades WHERE status = 'open' ORDER BY opened_at DESC`).all();
+}
+
+async function countOpenMt5Trades() {
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM mt5_trades WHERE status = 'open'`).get();
+  return row.n;
+}
+
+async function getTodayClosedPnl() {
+  const row = db.prepare(
+    `SELECT COALESCE(SUM(pnl), 0) AS total
+     FROM mt5_trades
+     WHERE status = 'closed' AND closed_at > datetime('now', 'start of day')`,
+  ).get();
+  return row.total;
+}
+
 module.exports = {
-  db, query, insertSignal, getStats, setBotState, getBotState,
+  db,
+  query,
+  insertSignal,
+  getStats,
+  setBotState,
+  getBotState,
+  insertMt5Trade,
+  closeMt5Trade,
+  failMt5Trade,
+  getOpenMt5Trades,
+  countOpenMt5Trades,
+  getTodayClosedPnl,
 };
