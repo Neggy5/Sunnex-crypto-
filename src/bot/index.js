@@ -1,5 +1,7 @@
 const { Telegraf, Markup } = require('telegraf');
-const { formatSignal, formatStats } = require('./format');
+const {
+  formatSignal, formatStats, formatLeaderboard, formatDigest,
+} = require('./format');
 const db = require('../db/pool');
 const exchange = require('../services/exchange');
 const mt5 = require('../services/mt5');
@@ -10,7 +12,7 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const ADMIN_IDS = (process.env.TELEGRAM_ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const EXCHANGES = (process.env.EXCHANGES || 'binance,bybit').split(',').map((s) => s.trim());
-const PAIRS = (process.env.PAIRS || 'BTC/USDT,ETH/USDT').split(',').map((s) => s.trim());
+const PAIRS = (process.env.PAIRS || 'BTC/USDT,ETH/USDT,BNB/USDT,SOL/USDT,XRP/USDT,DOGE/USDT,ADA/USDT,AVAX/USDT,LINK/USDT,LTC/USDT,DOT/USDT').split(',').map((s) => s.trim());
 const TIMEFRAMES = (process.env.TIMEFRAMES || '15m,1h').split(',').map((s) => s.trim());
 
 // MT5 live-trading config — all guarded by an explicit /enabletrading gate
@@ -21,8 +23,25 @@ const MT5_LOT_SIZE = Number(process.env.MT5_LOT_SIZE || 0.01);
 const MT5_MAX_OPEN_POSITIONS = Number(process.env.MT5_MAX_OPEN_POSITIONS || 3);
 const MT5_MAX_DAILY_LOSS = Number(process.env.MT5_MAX_DAILY_LOSS || -50); // account currency, negative
 
+// Used by the position-size calculator when MT5 isn't configured (or its
+// balance call fails) — a fallback account size so the button still works.
+const RISK_FALLBACK_BALANCE = Number(process.env.RISK_FALLBACK_BALANCE || 1000);
+const RISK_PERCENT_PER_TRADE = Number(process.env.RISK_PERCENT_PER_TRADE || 1); // % of balance
+
 function isAdmin(ctx) {
   return ADMIN_IDS.includes(String(ctx.from.id));
+}
+
+// Watchlist is a dynamic override of the env PAIRS list, stored in bot_state
+// so it survives restarts without needing a redeploy. Falls back to PAIRS
+// when nothing's been set yet.
+async function getWatchlist() {
+  const state = await db.getBotState('watchlist', null);
+  return state && Array.isArray(state.pairs) && state.pairs.length ? state.pairs : PAIRS;
+}
+
+async function setWatchlist(pairs) {
+  await db.setBotState('watchlist', { pairs });
 }
 
 function timeAgo(isoString) {
@@ -41,6 +60,11 @@ const COMMAND_LIST = [
   { command: 'status', description: 'Bot + exchange connection status' },
   { command: 'price', description: 'Live prices (all pairs, or e.g. /price BTC/USDT)' },
   { command: 'stats', description: 'Win rate and net pips (optionally: /stats 7)' },
+  { command: 'leaderboard', description: 'Top pairs by net pips (optionally: /leaderboard 7)' },
+  { command: 'watchlist', description: 'Show pairs currently being scanned' },
+  { command: 'addpair', description: 'Add a pair to the watchlist, e.g. /addpair SOL/USDT (admin)' },
+  { command: 'removepair', description: 'Remove a pair from the watchlist (admin)' },
+  { command: 'chart', description: 'TradingView chart link, e.g. /chart BTC/USDT' },
   { command: 'scan', description: 'Run an immediate scan and show results (admin)' },
   { command: 'pause', description: 'Stop signal scanning (admin)' },
   { command: 'resume', description: 'Resume signal scanning (admin)' },
@@ -69,6 +93,20 @@ bot.command('start', (ctx) => {
     + 'and posts them here. Real MT5 order placement is available (admin) but stays '
     + 'off until /enabletrading is sent.\n\n'
     + 'Use the menu button (☰) or type a command below.',
+    Markup.inlineKeyboard([
+      [
+        styledButton('📊 Status', 'menu:status'),
+        styledButton('💹 Live Prices', 'menu:prices', 'success'),
+      ],
+      [
+        styledButton('📈 Performance', 'menu:stats'),
+        styledButton('⭐ Watchlist', 'menu:watchlist', 'success'),
+      ],
+      [
+        styledButton('❓ Commands', 'menu:help'),
+        styledButton('⚠️ Risk Disclaimer', 'menu:disclaimer', 'danger'),
+      ],
+    ]),
   );
 });
 
@@ -100,7 +138,7 @@ bot.command('status', async (ctx) => {
 bot.command('price', async (ctx) => {
   const arg = ctx.message.text.split(' ')[1]?.toUpperCase();
   const requestedPair = arg ? (arg.includes('/') ? arg : `${arg}/USDT`) : null;
-  const pairsToFetch = requestedPair ? [requestedPair] : PAIRS;
+  const pairsToFetch = requestedPair ? [requestedPair] : await getWatchlist();
 
   const rows = [];
   for (const pair of pairsToFetch) {
@@ -127,12 +165,13 @@ bot.command('stats', async (ctx) => {
 
 bot.command('scan', async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
-  await ctx.reply(`🔎 Scanning ${EXCHANGES.length * PAIRS.length} exchange/pair combo(s) live — this hits Binance/Bybit for real, may take a few seconds…`);
+  const pairs = await getWatchlist();
+  await ctx.reply(`🔎 Scanning ${EXCHANGES.length * pairs.length} exchange/pair combo(s) live — this hits Binance/Bybit for real, may take a few seconds…`);
 
   const lines = [];
   let signalsFired = 0;
   for (const exchangeName of EXCHANGES) {
-    for (const pair of PAIRS) {
+    for (const pair of pairs) {
       try {
         const signal = await signalEngine.evaluatePair(exchangeName, pair, TIMEFRAMES);
         if (signal.direction === 'NO_TRADE') {
@@ -149,7 +188,7 @@ bot.command('scan', async (ctx) => {
     }
   }
 
-  await recordScan(PAIRS.length * EXCHANGES.length, signalsFired);
+  await recordScan(pairs.length * EXCHANGES.length, signalsFired);
   await ctx.reply(`Scan complete:\n\n${lines.join('\n')}`);
 });
 
@@ -268,6 +307,181 @@ bot.action(/^signal:(\d+):(taken|ignored)$/, async (ctx) => {
 
 bot.action('noop', (ctx) => ctx.answerCbQuery());
 
+// Handlers for the coloured quick-action buttons on /start. Each just
+// answers the callback and sends the same info the matching /command would.
+bot.action('menu:status', async (ctx) => {
+  await ctx.answerCbQuery();
+  const paused = await db.getBotState('paused', { value: false });
+  const lastScan = await db.getBotState('last_scan', null);
+  const connections = await Promise.all(
+    EXCHANGES.map(async (name) => `${name}: ${(await exchange.isConnected(name)) ? '🟢' : '🔴'}`),
+  );
+  const lastScanLine = lastScan
+    ? `Last scan: ${timeAgo(lastScan.at)} — ${lastScan.pairsScanned} pair(s) checked, ${lastScan.signalsFired} signal(s) fired`
+    : 'Last scan: none yet';
+  await ctx.reply(
+    `Bot status: ${paused.value ? '⏸ paused' : '▶️ running'}\n${connections.join('\n')}\n${lastScanLine}`,
+    Markup.inlineKeyboard([
+      paused.value
+        ? styledButton('▶️ Resume', 'admin:resume', 'success')
+        : styledButton('⏸ Pause', 'admin:pause', 'danger'),
+      styledButton('🔄 Refresh', 'status:refresh'),
+    ]),
+  );
+});
+
+bot.action('menu:prices', async (ctx) => {
+  await ctx.answerCbQuery();
+  const pairsToFetch = await getWatchlist();
+  const rows = [];
+  for (const pair of pairsToFetch) {
+    for (const exchangeName of EXCHANGES) {
+      try {
+        const { bid, ask } = await exchange.getPrice(exchangeName, pair);
+        const mid = (bid + ask) / 2;
+        rows.push(`${exchangeName}: ${pair} — ${mid.toFixed(mid < 10 ? 5 : 2)} (bid ${bid} / ask ${ask})`);
+      } catch (err) {
+        rows.push(`${exchangeName}: ${pair} — unavailable (${err.message})`);
+      }
+    }
+  }
+  await ctx.reply(rows.length ? `💹 Live prices\n\n${rows.join('\n')}` : 'No price data available.');
+});
+
+bot.action('menu:stats', async (ctx) => {
+  await ctx.answerCbQuery();
+  const stats = await db.getStats(30);
+  await ctx.reply(formatStats(stats, 30));
+});
+
+bot.action('menu:watchlist', async (ctx) => {
+  await ctx.answerCbQuery();
+  const pairs = await getWatchlist();
+  await ctx.reply(
+    `⭐ Watchlist (${pairs.length} pair${pairs.length === 1 ? '' : 's'})\n\n${pairs.join('\n')}\n\n`
+    + 'Add: /addpair SOL/USDT · Remove: /removepair SOL/USDT (admin)',
+  );
+});
+
+bot.action('menu:help', async (ctx) => {
+  await ctx.answerCbQuery();
+  const lines = COMMAND_LIST.map((c) => `/${c.command} — ${c.description}`);
+  await ctx.reply(`Available commands:\n\n${lines.join('\n')}`);
+});
+
+bot.action('menu:disclaimer', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    '⚠️ Risk Disclaimer\n\n'
+    + 'Signals are automated technical analysis, not financial advice. Crypto '
+    + 'markets are volatile — past signal performance does not guarantee future '
+    + 'results. Only trade with funds you can afford to lose, and size positions '
+    + 'according to your own risk tolerance.',
+  );
+});
+
+// Dynamic watchlist management — lets an admin change which pairs are
+// scanned without a redeploy. Falls back to the PAIRS env var until set.
+bot.command('watchlist', async (ctx) => {
+  const pairs = await getWatchlist();
+  await ctx.reply(
+    `⭐ Watchlist (${pairs.length} pair${pairs.length === 1 ? '' : 's'})\n\n${pairs.join('\n')}\n\n`
+    + 'Add: /addpair SOL/USDT · Remove: /removepair SOL/USDT (admin)',
+  );
+});
+
+bot.command('addpair', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
+  const arg = ctx.message.text.split(' ')[1]?.toUpperCase();
+  if (!arg) return ctx.reply('Usage: /addpair BTC/USDT');
+  const pair = arg.includes('/') ? arg : `${arg}/USDT`;
+
+  const pairs = await getWatchlist();
+  if (pairs.includes(pair)) return ctx.reply(`${pair} is already on the watchlist.`);
+
+  await setWatchlist([...pairs, pair]);
+  await ctx.reply(`✅ Added ${pair} to the watchlist. It'll be included from the next scan onward.`);
+});
+
+bot.command('removepair', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
+  const arg = ctx.message.text.split(' ')[1]?.toUpperCase();
+  if (!arg) return ctx.reply('Usage: /removepair BTC/USDT');
+  const pair = arg.includes('/') ? arg : `${arg}/USDT`;
+
+  const pairs = await getWatchlist();
+  if (!pairs.includes(pair)) return ctx.reply(`${pair} isn't on the watchlist.`);
+
+  const updated = pairs.filter((p) => p !== pair);
+  if (!updated.length) return ctx.reply('Refusing to remove the last pair — watchlist can\'t be empty.');
+
+  await setWatchlist(updated);
+  await ctx.reply(`✅ Removed ${pair} from the watchlist.`);
+});
+
+// TradingView chart link — a URL button, so it opens outside Telegram
+// rather than round-tripping through a callback.
+bot.command('chart', async (ctx) => {
+  const arg = ctx.message.text.split(' ')[1]?.toUpperCase();
+  if (!arg) return ctx.reply('Usage: /chart BTC/USDT');
+  const pair = arg.includes('/') ? arg : `${arg}/USDT`;
+  const symbol = pair.replace('/', '');
+
+  await ctx.reply(
+    `📊 ${pair} chart`,
+    Markup.inlineKeyboard([
+      Markup.button.url('Open in TradingView', `https://www.tradingview.com/chart/?symbol=${symbol}`),
+    ]),
+  );
+});
+
+// Per-pair performance ranking, reusing the same signals/trade_outcomes
+// data as /stats but grouped by pair.
+bot.command('leaderboard', async (ctx) => {
+  const days = Number(ctx.message.text.split(' ')[1]) || 30;
+  const rows = await db.getPairLeaderboard(days);
+  await ctx.reply(formatLeaderboard(rows, days));
+});
+
+// Position-size calculator, attached to every signal alongside the
+// existing Mark Taken / Ignore / Place Trade buttons. Pure arithmetic —
+// no order is placed. Uses live MT5 balance when available, else falls
+// back to RISK_FALLBACK_BALANCE, and risks RISK_PERCENT_PER_TRADE % of it.
+bot.action(/^calc:(\d+)$/, async (ctx) => {
+  const [, signalId] = ctx.match;
+  const { rows } = await db.query('SELECT * FROM signals WHERE id = $1', [signalId]);
+  const row = rows[0];
+  if (!row || row.direction === 'NO_TRADE') {
+    return ctx.answerCbQuery('Signal not found.', { show_alert: true });
+  }
+
+  let balance = RISK_FALLBACK_BALANCE;
+  let currency = 'USD';
+  let source = 'fallback balance';
+  if (mt5.isConfigured()) {
+    try {
+      const info = await mt5.getAccountInfo();
+      balance = info.balance;
+      currency = info.currency;
+      source = 'MT5 account balance';
+    } catch {
+      // stick with the fallback if MT5 is unreachable right now
+    }
+  }
+
+  const entry = (row.entry_zone_low + row.entry_zone_high) / 2;
+  const stopDistance = Math.abs(entry - row.stop_loss);
+  const riskAmount = balance * (RISK_PERCENT_PER_TRADE / 100);
+  const units = stopDistance > 0 ? riskAmount / stopDistance : 0;
+
+  await ctx.answerCbQuery(
+    `Risking ${RISK_PERCENT_PER_TRADE}% of ${balance.toFixed(2)} ${currency} (${source}) = `
+    + `${riskAmount.toFixed(2)} ${currency}\n`
+    + `Stop distance: ${stopDistance.toFixed(5)} → suggested size: ${units.toFixed(4)} units of ${row.pair}`,
+    { show_alert: true },
+  );
+});
+
 // Real order placement — every check below runs BEFORE any money moves.
 bot.action(/^mt5:place:(\d+)$/, async (ctx) => {
   const [, signalId] = ctx.match;
@@ -376,6 +590,7 @@ async function pushSignal(signal) {
   if (mt5.isConfigured() && mt5.mapSymbol(signal.pair)) {
     buttons.push(styledButton('📈 Place Trade (MT5)', `mt5:place:${id}`));
   }
+  buttons.push(styledButton('💰 Position Size', `calc:${id}`));
 
   await bot.telegram.sendMessage(CHAT_ID, text, Markup.inlineKeyboard(buttons));
   logger.info(`Signal #${id} sent for ${signal.pair}`);
@@ -398,5 +613,5 @@ async function recordScan(pairsScanned, signalsFired) {
 }
 
 module.exports = {
-  bot, pushSignal, isPaused, isTradingEnabled, registerCommands, recordScan,
+  bot, pushSignal, isPaused, isTradingEnabled, registerCommands, recordScan, getWatchlist, setWatchlist,
 };

@@ -33,4 +33,44 @@ function formatStats(stats, days) {
   ].join('\n');
 }
 
-module.exports = { formatSignal, formatStats };
+function formatLeaderboard(rows, days) {
+  if (!rows.length) return `🏆 Leaderboard — last ${days} days\n\nNo signals fired yet.`;
+
+  const medals = ['🥇', '🥈', '🥉'];
+  const lines = rows.map((r, i) => {
+    const decided = Number(r.wins) + Number(r.losses);
+    const winRate = decided > 0 ? `${((r.wins / decided) * 100).toFixed(0)}%` : 'n/a';
+    const rank = medals[i] || `${i + 1}.`;
+    return `${rank} ${r.pair} — ${Number(r.net_pips).toFixed(1)} pips · ${winRate} win rate (${r.total_signals} signals)`;
+  });
+
+  return [`🏆 Leaderboard — last ${days} days`, '', ...lines].join('\n');
+}
+
+function formatDigest({ statsToday, leaderboard }) {
+  const total = Number(statsToday.total_signals) || 0;
+  const wins = Number(statsToday.wins) || 0;
+  const losses = Number(statsToday.losses) || 0;
+  const netPips = Number(statsToday.net_pips) || 0;
+
+  const lines = [
+    '🌙 Daily Digest',
+    '',
+    `Signals fired today: ${total}`,
+    `Wins / Losses: ${wins} / ${losses}`,
+    `Net pips: ${netPips.toFixed(1)}`,
+  ];
+
+  if (leaderboard.length) {
+    lines.push('', 'Top pairs today:');
+    leaderboard.slice(0, 3).forEach((r) => {
+      lines.push(`• ${r.pair}: ${Number(r.net_pips).toFixed(1)} pips`);
+    });
+  }
+
+  return lines.join('\n');
+}
+
+module.exports = {
+  formatSignal, formatStats, formatLeaderboard, formatDigest,
+};
