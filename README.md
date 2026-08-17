@@ -1,8 +1,8 @@
 # Sunnex Crypto (Telegram Signal Bot)
 
-Phase 1: signal generation + Telegram alerts only. No live order execution —
-that's a deliberate later phase once signal quality is proven via `/stats`
-and backtesting.
+Signal generation + Telegram alerts, with optional real order execution on
+MT5 via MetaApi.cloud. Live trading is off by default and gated behind an
+explicit `/enabletrading` admin command every deploy — see below.
 
 ## Architecture
 
@@ -44,8 +44,14 @@ migration step, no external DB service to provision. Requires Node ≥22.5.
 ## Telegram commands
 
 - `/status` — bot + per-exchange connection status
+- `/price [pair]` — live bid/ask (all configured pairs, or one)
 - `/stats [days]` — win rate, net pips over the period (default 30 days)
 - `/pause` / `/resume` — admin-only, stop/start signal scanning
+- `/mt5status` — admin-only, MT5 connection + balance + trading gate state
+- `/positions` — admin-only, list open MT5 trades with a Close button
+- `/enabletrading` / `/disabletrading` — admin-only, the live-trading gate
+- Real signals get a **📈 Place Trade (MT5)** button (admin-only, only shown
+  if MT5 is configured and the pair has a symbol mapping)
 
 ## Config (.env)
 
@@ -55,6 +61,48 @@ migration step, no external DB service to provision. Requires Node ≥22.5.
 - `MIN_SIGNAL_SCORE` — confluence score threshold (0-100) to fire a signal
 - `MIN_RR` — minimum risk/reward to fire a signal
 - `SPREAD_LIMIT_PIPS` — skip evaluation if spread exceeds this
+
+## MT5 live trading (optional)
+
+Real order placement via [MetaApi.cloud](https://metaapi.cloud), a hosted
+bridge to your actual MT5 account — this bot runs on Railway (Linux), and
+MT5 itself has no public REST API, so a bridge is required either way.
+
+**Setup:**
+1. Create a MetaApi.cloud account and add your MT5 account (demo first —
+   strongly recommended) through their dashboard to get an `accountId`.
+2. Generate an API token in the MetaApi dashboard.
+3. Set `METAAPI_TOKEN` and `METAAPI_ACCOUNT_ID` in your env vars.
+4. Set `MT5_SYMBOL_MAP` to match your broker's exact symbol names (check
+   MT5's Market Watch — naming varies a lot between brokers, e.g. `BTCUSD`
+   vs `BTCUSDm` vs `BTCUSD.a`). A pair with no mapping simply won't show a
+   Place Trade button.
+5. Set `MT5_LOT_SIZE`, `MT5_MAX_OPEN_POSITIONS`, `MT5_MAX_DAILY_LOSS` to
+   your risk tolerance.
+6. Deploy, then send **`/enabletrading`** in Telegram. This step is
+   required every time — the gate defaults to disabled on every fresh
+   deploy, on purpose, regardless of whether MetaApi is configured.
+
+**Why signal prices and MT5 order prices differ:** signals are computed from
+Binance/Bybit spot prices, but your MT5 broker quotes its own CFD price for
+the same asset — the two feeds are not identical. Rather than sending the
+Binance-computed price as an absolute stop-loss/take-profit (which could
+land in the wrong place on a different price feed), the bot takes the
+*distance* implied by the signal's risk:reward and re-applies it to the
+live MT5 price at the moment the order is placed. This preserves the
+intended risk shape even though execution happens on a different venue.
+
+**Safety gates enforced before every order:**
+- `/enabletrading` must have been explicitly sent this deploy
+- Max concurrent open positions (`MT5_MAX_OPEN_POSITIONS`)
+- Daily closed-P&L floor (`MT5_MAX_DAILY_LOSS`) — no new trades once hit
+- Pair must have an `MT5_SYMBOL_MAP` entry
+
+**This code has not been tested against a live MetaApi account** (no
+network access in the environment that built it) — the MetaApi SDK calls
+follow their documented API surface, but SDK versions do drift. Test
+thoroughly on a demo account, starting with the smallest possible lot size,
+before ever pointing `METAAPI_ACCOUNT_ID` at a live account.
 
 ## Deploying to Railway
 
