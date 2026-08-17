@@ -21,18 +21,27 @@ function getClient(exchangeName) {
   return client;
 }
 
+const marketsLoaded = {};
+async function ensureMarketsLoaded(client, exchangeName) {
+  if (marketsLoaded[exchangeName]) return;
+  await client.loadMarkets();
+  marketsLoaded[exchangeName] = true;
+}
+
 // ccxt timeframe strings: '1m','5m','15m','1h','4h','1d' — map our M15/H1/H4 style if needed
 const TF_MAP = {
   M1: '1m', M5: '5m', M15: '15m', M30: '30m', H1: '1h', H4: '4h', D1: '1d',
 };
 
 function normalizeTf(tf) {
-  return TF_MAP[tf] || tf; // pass through if already in ccxt format (e.g. "15m")
+  const key = String(tf).trim().toUpperCase();
+  return TF_MAP[key] || String(tf).trim().toLowerCase(); // case-insensitive match, else pass through lowercased (ccxt format, e.g. "15m")
 }
 
 async function getPrice(exchangeName, pair) {
   try {
     const client = getClient(exchangeName);
+    await ensureMarketsLoaded(client, exchangeName);
     const ticker = await client.fetchTicker(pair);
     return { bid: ticker.bid, ask: ticker.ask, timestamp: ticker.timestamp };
   } catch (err) {
@@ -44,6 +53,7 @@ async function getPrice(exchangeName, pair) {
 async function getCandles(exchangeName, pair, timeframe, count = 200) {
   try {
     const client = getClient(exchangeName);
+    await ensureMarketsLoaded(client, exchangeName);
     const ohlcv = await client.fetchOHLCV(pair, normalizeTf(timeframe), undefined, count);
     return ohlcv.map(([time, open, high, low, close, volume]) => ({
       time, open, high, low, close, volume,
