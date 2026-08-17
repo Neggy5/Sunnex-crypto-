@@ -2,9 +2,25 @@ const analysis = require('./analysis');
 const exchange = require('../services/exchange');
 const logger = require('../utils/logger');
 
-const MIN_SIGNAL_SCORE = Number(process.env.MIN_SIGNAL_SCORE || 70);
-const MIN_RR = Number(process.env.MIN_RR || 1.5);
-const SPREAD_LIMIT_PIPS = Number(process.env.SPREAD_LIMIT_PIPS || 3);
+// Number(process.env.X || fallback) silently produces NaN if X is set but
+// malformed (extra whitespace, a stray unit, etc). That's dangerous here
+// specifically: `score < NaN` and `riskReward < NaN` both evaluate to
+// false in JS, meaning a NaN threshold doesn't fail closed — it disables
+// the filter entirely and lets every signal through. Guard against that.
+function numEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    logger.error(`${name}="${raw}" is not a valid number — falling back to ${fallback}. Fix this env var.`);
+    return fallback;
+  }
+  return n;
+}
+
+const MIN_SIGNAL_SCORE = numEnv('MIN_SIGNAL_SCORE', 70);
+const MIN_RR = numEnv('MIN_RR', 1.5);
+const SPREAD_LIMIT_PIPS = numEnv('SPREAD_LIMIT_PIPS', 3);
 
 /**
  * Evaluate one pair on one exchange across its configured timeframes and
@@ -53,7 +69,7 @@ async function evaluatePair(exchangeName, pair, timeframes) {
     stopLoss,
     takeProfit,
     riskReward,
-    reasoning: reasons.join('; '),
+    reasoning: reasons.length ? reasons.join('; ') : 'Directional confluence from weighted factor scoring — see breakdown',
     marketContext: { spreadPips, evaluatedTimeframes: timeframes },
     scoreDetail,
     minSignalScore: MIN_SIGNAL_SCORE,
@@ -64,7 +80,7 @@ function scoreConfluence(perTf, timeframes) {
   let bullPoints = 0;
   let bearPoints = 0;
   const reasons = [];
-  const factors = []; // transparent breakdown: every point-scoring factor, timeframe, and side
+  const factors = []; // raw (pre-normalization) — normalized below once maxPossible is known
 
   for (const tf of timeframes) {
     const { trend, breakout, momentum } = perTf[tf];
@@ -102,12 +118,12 @@ function scoreConfluence(perTf, timeframes) {
 
     if (momentum.direction === 'UP') {
       const points = 10 * weight;
-      bullPoints += points;
+      bullPoints += points; reasons.push(`${tf} momentum up`);
       factors.push({ timeframe: tf, label: `momentum up (${momentum.strength.toFixed(5)} over 10 candles)`, points, side: 'bull' });
     }
     if (momentum.direction === 'DOWN') {
       const points = 10 * weight;
-      bearPoints += points;
+      bearPoints += points; reasons.push(`${tf} momentum down`);
       factors.push({ timeframe: tf, label: `momentum down (${momentum.strength.toFixed(5)} over 10 candles)`, points, side: 'bear' });
     }
   }
@@ -115,8 +131,34 @@ function scoreConfluence(perTf, timeframes) {
   const maxPossible = timeframes.reduce((sum, tf) => sum + (tf === timeframes[0] ? 45 * 1.5 : 45), 0);
   const bullScore = Math.round((bullPoints / maxPossible) * 100);
   const bearScore = Math.round((bearPoints / maxPossible) * 100);
+
+  // Normalize every factor's contribution to the same 0-100 scale as
+  // bullScore/bearScore, so "sum of the bull factors shown" always equals
+  // the bull confidence % displayed — no more raw-points-vs-percentage
+  // mismatch. Rounded to 1 decimal for readability; the sum can be off by
+  // <=0.1 per factor from rounding, not from a unit mismatch.
+  const normalizedFactors = factors.map((f) => ({
+    ...f,
+    pct: Math.round(((f.points / maxPossible) * 100) * 10) / 10,
+  }));
+
+  // Flag disagreeing trend direction across timeframes — e.g. entry TF
+  // uptrend while a higher TF is in downtrend — so it's visible even when
+  // the weighted score still favors one side overall.
+  const conflicts = [];
+  const trendsByTf = timeframes
+    .map((tf) => ({ tf, trend: perTf[tf].trend.trend }))
+    .filter((t) => t.trend === 'UPTREND' || t.trend === 'DOWNTREND');
+  for (let i = 0; i < trendsByTf.length; i += 1) {
+    for (let j = i + 1; j < trendsByTf.length; j += 1) {
+      if (trendsByTf[i].trend !== trendsByTf[j].trend) {
+        conflicts.push(`${trendsByTf[i].tf} ${trendsByTf[i].trend.toLowerCase()} vs ${trendsByTf[j].tf} ${trendsByTf[j].trend.toLowerCase()}`);
+      }
+    }
+  }
+
   const scoreDetail = {
-    bullScore, bearScore, maxPossible, factors,
+    bullScore, bearScore, maxPossible, factors: normalizedFactors, conflicts,
   };
 
   if (bullScore > bearScore && bullScore >= 0) return { score: bullScore, direction: 'BUY', reasons, scoreDetail };
