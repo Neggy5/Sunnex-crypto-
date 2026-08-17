@@ -51,7 +51,7 @@ function evaluateOutcome(entryCandles, signalIndex, signal) {
 }
 
 async function backtestPair({
-  exchangeName, pair, timeframes, historyCandles, window, assumedSpreadPips,
+  exchangeName, pair, timeframes, historyCandles, window, assumedSpreadPips, feePctPerSide, slippagePctPerSide,
 }) {
   logger.info(`Fetching ${historyCandles} historical candles — ${exchangeName}:${pair} across ${timeframes.join(', ')}`);
 
@@ -99,7 +99,24 @@ async function backtestPair({
 
     if (result.direction !== 'NO_TRADE') {
       const { outcome, exitTime, barsHeld, ambiguous } = evaluateOutcome(entryCandles, i, result);
-      const pnlR = outcome === 'TP' ? result.riskReward : (outcome === 'SL' ? -1 : null);
+      const pnlRGross = outcome === 'TP' ? result.riskReward : (outcome === 'SL' ? -1 : null);
+
+      // Fees + slippage, modeled as a fixed cost applied on both entry and
+      // exit (round trip), converted into R-multiples by dividing by the
+      // trade's own risk distance — so a tight-stop trade correctly eats a
+      // bigger chunk of its R than a wide-stop trade for the same % cost.
+      // Costs apply whether the trade wins or loses; they don't apply to
+      // OPEN trades since no exit fill (real or simulated) has happened.
+      let pnlR = pnlRGross;
+      let costR = null;
+      if (pnlRGross !== null) {
+        const entryPrice = (result.entryZoneLow + result.entryZoneHigh) / 2;
+        const stopDistance = Math.abs(entryPrice - result.stopLoss);
+        const roundTripCostPct = 2 * (feePctPerSide + slippagePctPerSide);
+        const costPrice = entryPrice * (roundTripCostPct / 100);
+        costR = stopDistance > 0 ? costPrice / stopDistance : 0;
+        pnlR = pnlRGross - costR;
+      }
 
       results.push({
         ...result,
@@ -107,7 +124,9 @@ async function backtestPair({
         outcome, // 'TP' | 'SL' | 'OPEN'
         exitTime: exitTime ? new Date(exitTime).toISOString() : null,
         barsHeld,
-        pnlR, // in R-multiples: +riskReward on TP, -1 on SL, null if still OPEN
+        pnlRGross, // in R-multiples before fees/slippage: +riskReward on TP, -1 on SL, null if OPEN
+        costR, // fees + slippage cost, in R-multiples, null if OPEN
+        pnlR, // net P/L in R-multiples after fees/slippage — use this for stats
         outcomeAmbiguous: ambiguous,
       });
     }
@@ -145,6 +164,17 @@ function computeTradeStats(trades) {
     ? sorted.reduce((sum, t) => sum + t.riskReward, 0) / sorted.length
     : null;
 
+  const grossProfit = wins.reduce((sum, t) => sum + t.pnlR, 0); // positive
+  const grossLoss = losses.reduce((sum, t) => sum + t.pnlR, 0); // negative
+  // Profit factor: gross winnings / gross losses (both same units, R).
+  // Undefined (null) with no losses AND no wins; Infinity with wins but zero losses.
+  let profitFactor = null;
+  if (grossLoss < 0) profitFactor = grossProfit / Math.abs(grossLoss);
+  else if (grossProfit > 0) profitFactor = Infinity;
+
+  const avgWin = wins.length ? grossProfit / wins.length : null;
+  const avgLoss = losses.length ? grossLoss / losses.length : null; // negative, e.g. -1.05R
+
   let peak = 0;
   let cum = 0;
   let maxDrawdown = 0;
@@ -162,9 +192,28 @@ function computeTradeStats(trades) {
     winRate,
     totalPL,
     avgRR,
+    profitFactor,
+    avgWin,
+    avgLoss,
     maxDrawdown,
     trades: sorted,
   };
+}
+
+// Confidence bands requested for the report. Upper bound is inclusive;
+// the last band has no ceiling.
+const CONFIDENCE_BANDS = [
+  { label: '70-74', min: 70, max: 74 },
+  { label: '75-79', min: 75, max: 79 },
+  { label: '80-89', min: 80, max: 89 },
+  { label: '90+', min: 90, max: Infinity },
+];
+
+function computeStatsByConfidenceBand(trades) {
+  return CONFIDENCE_BANDS.map((band) => {
+    const inBand = trades.filter((t) => t.confidence >= band.min && t.confidence <= band.max);
+    return { label: band.label, ...computeTradeStats(inBand) };
+  });
 }
 
 function summarize(allResults, reportMinScore) {
@@ -187,6 +236,8 @@ function summarize(allResults, reportMinScore) {
     // Stats over only signals that clear reportMinScore — this is the set
     // that matters, since it's what the live bot would actually have sent.
     statsQualifying: computeTradeStats(qualifying),
+    // Same qualifying set, broken out by confidence band.
+    statsByConfidenceBand: computeStatsByConfidenceBand(qualifying),
   };
 }
 
@@ -197,7 +248,8 @@ function summarize(allResults, reportMinScore) {
  * script, Telegram /backtest command) decide how to present/store it.
  */
 async function runBacktest({
-  exchanges, pairs, timeframes, historyCandles = 1000, window = 200, reportMinScore = 70, assumedSpreadPips = 0,
+  exchanges, pairs, timeframes, historyCandles = 1000, window = 200, reportMinScore = 70,
+  assumedSpreadPips = 0, feePctPerSide = 0, slippagePctPerSide = 0,
 }) {
   const allResults = [];
   const errors = [];
@@ -207,7 +259,7 @@ async function runBacktest({
       try {
         // eslint-disable-next-line no-await-in-loop
         const results = await backtestPair({
-          exchangeName, pair, timeframes, historyCandles, window, assumedSpreadPips,
+          exchangeName, pair, timeframes, historyCandles, window, assumedSpreadPips, feePctPerSide, slippagePctPerSide,
         });
         allResults.push(...results);
         logger.info(`${exchangeName}:${pair} — ${results.length} non-NO_TRADE signals across the walk-forward run`);
@@ -222,7 +274,7 @@ async function runBacktest({
 
   return {
     config: {
-      exchanges, pairs, timeframes, historyCandles, window, reportMinScore, assumedSpreadPips,
+      exchanges, pairs, timeframes, historyCandles, window, reportMinScore, assumedSpreadPips, feePctPerSide, slippagePctPerSide,
     },
     allResults,
     summary,
@@ -231,5 +283,5 @@ async function runBacktest({
 }
 
 module.exports = {
-  runBacktest, sliceAsOf, evaluateOutcome, computeTradeStats,
+  runBacktest, sliceAsOf, evaluateOutcome, computeTradeStats, computeStatsByConfidenceBand,
 };
