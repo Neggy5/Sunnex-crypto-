@@ -1,8 +1,26 @@
-function formatFactors(scoreDetail) {
-  if (!scoreDetail || !scoreDetail.factors.length) return '   (no contributing factors — flat/range conditions)';
-  return scoreDetail.factors
-    .map((f) => `   • [${f.side === 'bull' ? 'bull' : 'bear'}] ${f.timeframe} ${f.label}: +${f.points.toFixed(1)} pts`)
-    .join('\n');
+// Splits factors by side and shows each one's normalized contribution
+// (the same 0-100 scale as bullScore/bearScore), so "sum of bull lines"
+// always equals the bull confidence % shown above it — no separate math
+// needed to verify the numbers agree.
+function formatFactorSide(scoreDetail, side) {
+  const items = scoreDetail.factors.filter((f) => f.side === side);
+  if (!items.length) return '   (none)';
+  return items.map((f) => `   • ${f.timeframe} ${f.label}: +${f.pct.toFixed(1)}`).join('\n');
+}
+
+function formatBreakdown(scoreDetail) {
+  if (!scoreDetail) return '   (breakdown unavailable — filtered before scoring, see reason below)';
+  const lines = [
+    `  Bull factors (sum ${scoreDetail.bullScore}):`,
+    formatFactorSide(scoreDetail, 'bull'),
+    `  Bear factors (sum ${scoreDetail.bearScore}):`,
+    formatFactorSide(scoreDetail, 'bear'),
+  ];
+  if (scoreDetail.conflicts?.length) {
+    lines.push('  ⚠️ Conflicting timeframes:');
+    scoreDetail.conflicts.forEach((c) => lines.push(`   • ${c}`));
+  }
+  return lines.join('\n');
 }
 
 function formatSignal(signal) {
@@ -14,7 +32,7 @@ function formatSignal(signal) {
     '',
     `Confidence: ${signal.confidence}%  (bull ${signal.scoreDetail?.bullScore ?? '?'} vs bear ${signal.scoreDetail?.bearScore ?? '?'}, threshold ${signal.minSignalScore ?? '?'})`,
     'Confidence breakdown:',
-    formatFactors(signal.scoreDetail),
+    formatBreakdown(signal.scoreDetail),
     '',
     `Entry zone: ${signal.entryZoneLow.toFixed(5)} - ${signal.entryZoneHigh.toFixed(5)}`,
     `SL: ${signal.stopLoss.toFixed(5)}`,
@@ -37,10 +55,10 @@ function formatScanBlock(signal) {
     return [
       `⚪ ${signal.pair}  (${signal.exchange})  — NO TRADE`,
       scoreLine,
-      signal.scoreDetail ? 'Confidence breakdown:' : null,
-      signal.scoreDetail ? formatFactors(signal.scoreDetail) : null,
+      'Confidence breakdown:',
+      formatBreakdown(signal.scoreDetail),
       `Reason: ${signal.reasoning}`,
-    ].filter(Boolean).join('\n');
+    ].join('\n');
   }
 
   const arrow = signal.direction === 'BUY' ? '🟢 BUY' : '🔴 SELL';
@@ -48,7 +66,7 @@ function formatScanBlock(signal) {
     `${arrow}  ${signal.pair}  (${signal.exchange} · ${signal.timeframe})`,
     `Confidence: ${signal.confidence}%  (bull ${signal.scoreDetail?.bullScore ?? '?'} vs bear ${signal.scoreDetail?.bearScore ?? '?'}, threshold ${signal.minSignalScore ?? '?'})`,
     'Confidence breakdown:',
-    formatFactors(signal.scoreDetail),
+    formatBreakdown(signal.scoreDetail),
     `Entry zone: ${signal.entryZoneLow.toFixed(5)} - ${signal.entryZoneHigh.toFixed(5)}`,
     `SL: ${signal.stopLoss.toFixed(5)}`,
     `TP: ${signal.takeProfit.toFixed(5)}`,
