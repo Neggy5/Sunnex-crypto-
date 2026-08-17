@@ -1,6 +1,6 @@
 const { Telegraf, Markup } = require('telegraf');
 const {
-  formatSignal, formatStats, formatLeaderboard, formatDigest,
+  formatSignal, formatStats, formatLeaderboard, formatDigest, formatScanBlock,
 } = require('./format');
 const db = require('../db/pool');
 const exchange = require('../services/exchange');
@@ -65,7 +65,7 @@ const COMMAND_LIST = [
   { command: 'addpair', description: 'Add a pair to the watchlist, e.g. /addpair SOL/USDT (admin)' },
   { command: 'removepair', description: 'Remove a pair from the watchlist (admin)' },
   { command: 'chart', description: 'TradingView chart link, e.g. /chart BTC/USDT' },
-  { command: 'scan', description: 'Run an immediate scan and show results (admin)' },
+  { command: 'scan', description: 'Run an immediate scan — full detail; add "brief" for a compact one-liner (admin)' },
   { command: 'pause', description: 'Stop signal scanning (admin)' },
   { command: 'resume', description: 'Resume signal scanning (admin)' },
   { command: 'mt5status', description: 'MT5 connection + account balance (admin)' },
@@ -186,12 +186,57 @@ bot.command('stats', async (ctx) => {
   ctx.reply(formatStats(stats, days));
 });
 
+// Compact one-liner — the original /scan output, kept for `/scan brief`
+// when the full breakdown per pair is more than you want scrolling through.
+function formatScanBriefLine(signal) {
+  if (signal.direction === 'NO_TRADE') {
+    return `⚪ ${signal.exchange}:${signal.pair} — no trade (score ${signal.confidence}/${signal.minSignalScore ?? '?'}) — ${signal.reasoning}`;
+  }
+  return `${signal.direction === 'BUY' ? '🟢' : '🔴'} ${signal.exchange}:${signal.pair} — ${signal.direction} @ ${signal.confidence}% confidence`;
+}
+
+// Packs blocks into <=maxChunk-sized messages without ever splitting a
+// single block across two messages (a "block" here is one full signal's
+// worth of detail — BUY/SELL, confidence, entry/SL/TP/R:R, reasoning — so
+// it always stays together as one readable unit). Two-pass: pack first,
+// then label with "Part i/N" once the total is known, so headers only
+// appear when there's actually more than one message.
+function packIntoChunks(header, blocks, maxChunk = 3500) {
+  const separator = '\n\n───────────\n\n';
+  const chunks = [];
+  let current = '';
+
+  for (const block of blocks) {
+    if (current && current.length + separator.length + block.length > maxChunk) {
+      chunks.push(current);
+      current = '';
+    }
+    if (block.length > maxChunk) {
+      // a single block is itself too big (shouldn't normally happen) —
+      // send it alone rather than corrupting the pack-together guarantee
+      if (current) { chunks.push(current); current = ''; }
+      chunks.push(block);
+      continue;
+    }
+    current += (current ? separator : '') + block;
+  }
+  if (current) chunks.push(current);
+
+  const total = chunks.length;
+  return chunks.map((body, i) => {
+    const partLabel = total > 1 ? `Part ${i + 1}/${total}\n\n` : '';
+    const headerLine = i === 0 ? `${header}\n\n` : '';
+    return `${partLabel}${headerLine}${body}`;
+  });
+}
+
 bot.command('scan', async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
+  const brief = ctx.message.text.split(' ')[1]?.toLowerCase() === 'brief';
   const pairs = await getWatchlist();
   await ctx.reply(`🔎 Scanning ${EXCHANGES.length * pairs.length} exchange/pair combo(s) live — this hits Binance/Bybit for real, may take a few seconds…`);
 
-  const lines = [];
+  const blocks = [];
   let signalsFired = 0;
   for (const exchangeName of EXCHANGES) {
     for (const pair of pairs) {
@@ -199,20 +244,25 @@ bot.command('scan', async (ctx) => {
         const signal = await signalEngine.evaluatePair(exchangeName, pair, TIMEFRAMES);
         if (signal.direction === 'NO_TRADE') {
           await db.insertSignal(signal);
-          lines.push(`⚪ ${exchangeName}:${pair} — no trade (${signal.reasoning})`);
         } else {
           signalsFired += 1;
-          lines.push(`🟢 ${exchangeName}:${pair} — ${signal.direction} @ ${signal.confidence}% confidence`);
           await pushSignal(signal); // inserts + posts to chat
         }
+        blocks.push(brief ? formatScanBriefLine(signal) : formatScanBlock(signal));
       } catch (err) {
-        lines.push(`🔴 ${exchangeName}:${pair} — error: ${err.message}`);
+        blocks.push(`🔴 ${exchangeName}:${pair} — error: ${err.message}`);
       }
     }
   }
 
   await recordScan(pairs.length * EXCHANGES.length, signalsFired);
-  await ctx.reply(`Scan complete:\n\n${lines.join('\n')}`);
+
+  const header = `Scan complete — ${signalsFired} signal(s) fired out of ${blocks.length} evaluated:`;
+  const messages = packIntoChunks(header, blocks, brief ? 3800 : 3500);
+  for (const msg of messages) {
+    // eslint-disable-next-line no-await-in-loop
+    await ctx.reply(msg);
+  }
 });
 
 bot.command('mt5status', async (ctx) => {

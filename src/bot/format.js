@@ -1,3 +1,10 @@
+function formatFactors(scoreDetail) {
+  if (!scoreDetail || !scoreDetail.factors.length) return '   (no contributing factors — flat/range conditions)';
+  return scoreDetail.factors
+    .map((f) => `   • [${f.side === 'bull' ? 'bull' : 'bear'}] ${f.timeframe} ${f.label}: +${f.points.toFixed(1)} pts`)
+    .join('\n');
+}
+
 function formatSignal(signal) {
   if (signal.direction === 'NO_TRADE') return null; // don't spam chat with every no-trade eval
 
@@ -5,7 +12,10 @@ function formatSignal(signal) {
   const lines = [
     `${arrow}  ${signal.pair}  (${signal.exchange} · ${signal.timeframe})`,
     '',
-    `Confidence: ${signal.confidence}%`,
+    `Confidence: ${signal.confidence}%  (bull ${signal.scoreDetail?.bullScore ?? '?'} vs bear ${signal.scoreDetail?.bearScore ?? '?'}, threshold ${signal.minSignalScore ?? '?'})`,
+    'Confidence breakdown:',
+    formatFactors(signal.scoreDetail),
+    '',
     `Entry zone: ${signal.entryZoneLow.toFixed(5)} - ${signal.entryZoneHigh.toFixed(5)}`,
     `SL: ${signal.stopLoss.toFixed(5)}`,
     `TP: ${signal.takeProfit.toFixed(5)}`,
@@ -14,6 +24,37 @@ function formatSignal(signal) {
     `Reasoning: ${signal.reasoning}`,
   ];
   return lines.join('\n');
+}
+
+// Full per-pair block used by /scan — unlike formatSignal, this also covers
+// NO_TRADE results, so near-miss scores and their factor breakdown are
+// visible instead of just a one-line reason.
+function formatScanBlock(signal) {
+  if (signal.direction === 'NO_TRADE') {
+    const scoreLine = signal.scoreDetail
+      ? `Score: ${signal.confidence}/${signal.minSignalScore} required  (bull ${signal.scoreDetail.bullScore} vs bear ${signal.scoreDetail.bearScore})`
+      : 'Score: n/a (filtered before scoring — see reason below)';
+    return [
+      `⚪ ${signal.pair}  (${signal.exchange})  — NO TRADE`,
+      scoreLine,
+      signal.scoreDetail ? 'Confidence breakdown:' : null,
+      signal.scoreDetail ? formatFactors(signal.scoreDetail) : null,
+      `Reason: ${signal.reasoning}`,
+    ].filter(Boolean).join('\n');
+  }
+
+  const arrow = signal.direction === 'BUY' ? '🟢 BUY' : '🔴 SELL';
+  return [
+    `${arrow}  ${signal.pair}  (${signal.exchange} · ${signal.timeframe})`,
+    `Confidence: ${signal.confidence}%  (bull ${signal.scoreDetail?.bullScore ?? '?'} vs bear ${signal.scoreDetail?.bearScore ?? '?'}, threshold ${signal.minSignalScore ?? '?'})`,
+    'Confidence breakdown:',
+    formatFactors(signal.scoreDetail),
+    `Entry zone: ${signal.entryZoneLow.toFixed(5)} - ${signal.entryZoneHigh.toFixed(5)}`,
+    `SL: ${signal.stopLoss.toFixed(5)}`,
+    `TP: ${signal.takeProfit.toFixed(5)}`,
+    `R:R: ${signal.riskReward.toFixed(2)}`,
+    `Reasoning: ${signal.reasoning}`,
+  ].join('\n');
 }
 
 function formatStats(stats, days) {
@@ -72,5 +113,5 @@ function formatDigest({ statsToday, leaderboard }) {
 }
 
 module.exports = {
-  formatSignal, formatStats, formatLeaderboard, formatDigest,
+  formatSignal, formatStats, formatLeaderboard, formatDigest, formatScanBlock,
 };
