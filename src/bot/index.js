@@ -319,7 +319,31 @@ bot.command('backtest', async (ctx) => {
       return;
     }
 
-    const blocks = [];
+    // s.trades is every qualifying signal (not just the 2+2 examples below),
+    // each walked forward through the historical candles after it fired to
+    // see whether takeProfit or stopLoss was hit first. P/L is in
+    // R-multiples (asset-agnostic — works the same for crypto as forex).
+    const s = summary.statsQualifying;
+    const statsBlock = [
+      '📊 Performance (qualifying signals):',
+      `Trades: ${s.totalTrades} closed, ${s.openTrades} still open at end of history`,
+      `Wins/Losses: ${s.wins}/${s.losses}  |  Win rate: ${s.winRate === null ? 'n/a' : `${s.winRate.toFixed(1)}%`}`,
+      `Total P/L: ${s.totalPL === null ? 'n/a' : `${s.totalPL >= 0 ? '+' : ''}${s.totalPL.toFixed(2)}R`}`,
+      `Avg R:R (planned): ${s.avgRR === null ? 'n/a' : s.avgRR.toFixed(2)}  |  Max drawdown: ${s.maxDrawdown.toFixed(2)}R`,
+    ].join('\n');
+
+    const outcomesBlock = [
+      '📋 Individual signal outcomes:',
+      ...s.trades.map((t) => {
+        const tag = t.outcome === 'TP' ? '✅ TP hit' : (t.outcome === 'SL' ? '❌ SL hit' : '⏳ still open');
+        const pnl = t.pnlR === null ? '' : ` (${t.pnlR >= 0 ? '+' : ''}${t.pnlR.toFixed(2)}R)`;
+        const ambiguous = t.outcomeAmbiguous ? ' [SL/TP same candle, assumed SL]' : '';
+        const when = t.backtestTime.slice(0, 16).replace('T', ' ');
+        return `${when} ${t.direction} ${t.exchange} conf ${t.confidence}% → ${tag}${pnl}, ${t.barsHeld} bars${ambiguous}`;
+      }),
+    ].join('\n');
+
+    const blocks = [statsBlock, outcomesBlock];
     summary.qualifyingBuy.slice(0, 2).forEach((sig) => blocks.push(`[as of ${sig.backtestTime}]\n${formatScanBlock(sig)}`));
     summary.qualifyingSell.slice(0, 2).forEach((sig) => blocks.push(`[as of ${sig.backtestTime}]\n${formatScanBlock(sig)}`));
 
