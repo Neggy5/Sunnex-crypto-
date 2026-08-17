@@ -135,6 +135,37 @@ bot.command('status', async (ctx) => {
   );
 });
 
+// Fetches one pair's price from every source that has it configured/mapped:
+// crypto exchanges (Binance/Bybit) plus, if MT5_SYMBOL_MAP has an entry for
+// this pair, the live MT5 broker feed too. This is what lets forex pairs
+// like EUR/USD — which no crypto exchange lists — actually resolve to a
+// real price instead of always showing "unavailable".
+async function fetchPairPriceRows(pair) {
+  const rows = [];
+  for (const exchangeName of EXCHANGES) {
+    try {
+      const { bid, ask } = await exchange.getPrice(exchangeName, pair);
+      const mid = (bid + ask) / 2;
+      rows.push(`${exchangeName}: ${pair} — ${mid.toFixed(mid < 10 ? 5 : 2)} (bid ${bid} / ask ${ask})`);
+    } catch (err) {
+      rows.push(`${exchangeName}: ${pair} — unavailable (${err.message})`);
+    }
+  }
+
+  const mt5Symbol = mt5.mapSymbol(pair);
+  if (mt5.isConfigured() && mt5Symbol) {
+    try {
+      const { bid, ask } = await mt5.getMt5Price(mt5Symbol);
+      const mid = (bid + ask) / 2;
+      rows.push(`mt5 (${mt5Symbol}): ${pair} — ${mid.toFixed(mid < 10 ? 5 : 2)} (bid ${bid} / ask ${ask})`);
+    } catch (err) {
+      rows.push(`mt5 (${mt5Symbol}): ${pair} — unavailable (${err.message})`);
+    }
+  }
+
+  return rows;
+}
+
 bot.command('price', async (ctx) => {
   const arg = ctx.message.text.split(' ')[1]?.toUpperCase();
   const requestedPair = arg ? (arg.includes('/') ? arg : `${arg}/USDT`) : null;
@@ -142,15 +173,7 @@ bot.command('price', async (ctx) => {
 
   const rows = [];
   for (const pair of pairsToFetch) {
-    for (const exchangeName of EXCHANGES) {
-      try {
-        const { bid, ask } = await exchange.getPrice(exchangeName, pair);
-        const mid = (bid + ask) / 2;
-        rows.push(`${exchangeName}: ${pair} — ${mid.toFixed(mid < 10 ? 5 : 2)} (bid ${bid} / ask ${ask})`);
-      } catch (err) {
-        rows.push(`${exchangeName}: ${pair} — unavailable (${err.message})`);
-      }
-    }
+    rows.push(...await fetchPairPriceRows(pair));
   }
 
   if (!rows.length) return ctx.reply(`No price data for ${requestedPair || 'configured pairs'}.`);
@@ -335,15 +358,7 @@ bot.action('menu:prices', async (ctx) => {
   const pairsToFetch = await getWatchlist();
   const rows = [];
   for (const pair of pairsToFetch) {
-    for (const exchangeName of EXCHANGES) {
-      try {
-        const { bid, ask } = await exchange.getPrice(exchangeName, pair);
-        const mid = (bid + ask) / 2;
-        rows.push(`${exchangeName}: ${pair} — ${mid.toFixed(mid < 10 ? 5 : 2)} (bid ${bid} / ask ${ask})`);
-      } catch (err) {
-        rows.push(`${exchangeName}: ${pair} — unavailable (${err.message})`);
-      }
-    }
+    rows.push(...await fetchPairPriceRows(pair));
   }
   await ctx.reply(rows.length ? `💹 Live prices\n\n${rows.join('\n')}` : 'No price data available.');
 });
