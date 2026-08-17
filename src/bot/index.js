@@ -276,6 +276,10 @@ bot.command('scan', async (ctx) => {
 // Telegram command and an admin is waiting on the reply.
 const BACKTEST_TELEGRAM_CANDLES = Number(process.env.BACKTEST_TELEGRAM_CANDLES || 500);
 const BACKTEST_TELEGRAM_WINDOW = Number(process.env.BACKTEST_WINDOW || 200);
+// Same assumed-spread stand-in as the CLI backtest (npm run backtest) — see
+// engine.js backtestPair() for why. Shared env var so both entry points
+// stay configured identically.
+const BACKTEST_ASSUMED_SPREAD_PIPS = Number(process.env.BACKTEST_ASSUMED_SPREAD_PIPS || 0);
 let backtestRunning = false;
 
 bot.command('backtest', async (ctx) => {
@@ -304,6 +308,7 @@ bot.command('backtest', async (ctx) => {
       historyCandles: BACKTEST_TELEGRAM_CANDLES,
       window: BACKTEST_TELEGRAM_WINDOW,
       reportMinScore: minScore,
+      assumedSpreadPips: BACKTEST_ASSUMED_SPREAD_PIPS,
     });
 
     const headerLine = `Backtest complete — ${pair}: ${summary.totalSignals} signal(s) fired `
