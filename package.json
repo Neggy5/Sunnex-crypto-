@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "backtest": "node src/backtest/run.js"
+    "backtest": "node src/backtest/run.js",
+    "test:wiring": "node test_wiring.js"
   },
   "dependencies": {
     "telegraf": "^4.16.3",

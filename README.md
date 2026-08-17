@@ -121,8 +121,52 @@ before ever pointing `METAAPI_ACCOUNT_ID` at a live account.
 No database plugin, connection string, or manual schema step needed — the
 SQLite file is created and migrated automatically on first boot.
 
+## Backtest mode (`npm run backtest`)
+
+Walks historical candles through the **same** scoring logic the live scanner
+uses (`signalEngine.evaluateFromData` — the pure scoring step, factored out
+of `evaluatePair` so both paths share one implementation), so you can see
+what a real >=70 BUY and >=70 SELL look like without waiting for one to fire
+live and without placing any trade.
+
+Fully read-only: fetches historical OHLCV from the exchange (no API key
+needed, same as live market data), no Telegram messages sent, no MT5/order
+calls, no DB writes. Results print to the console and are also written in
+full to `data/backtest-results.json`.
+
+```
+npm run backtest
+```
+
+Config (all optional, env vars):
+
+- `BACKTEST_EXCHANGES` / `BACKTEST_PAIRS` / `BACKTEST_TIMEFRAMES` — default
+  to the live `EXCHANGES` / `PAIRS` / `TIMEFRAMES` vars, so it scans the same
+  universe as production unless overridden.
+- `BACKTEST_CANDLES` — raw candles fetched per timeframe up front (default
+  1000; exchanges typically cap a single fetch around 1000-1500).
+- `BACKTEST_WINDOW` — lookback window fed to the analysis functions at each
+  step (default 200, matching the live engine's `getCandles(..., 200)`).
+- `BACKTEST_MIN_SCORE` — confidence bar used to pick example signals for the
+  report (default 70). Deliberately **independent** of the live
+  `MIN_SIGNAL_SCORE` var, so a misconfigured live threshold doesn't hide
+  what a genuine 70+ signal looks like.
+- `BACKTEST_MAX_EXAMPLES` — example signals printed per direction (default 3).
+- `BACKTEST_OUTPUT` — path for the full JSON dump (default
+  `data/backtest-results.json`).
+
+**Known limitation:** there's no historical bid/ask spread in a plain OHLCV
+feed, so each step uses the candle close as both bid and ask (spread = 0
+pips). That means `SPREAD_LIMIT_PIPS` never rejects a step here the way it
+can filter a live signal — everything else (trend, breakout, momentum,
+confluence score, SL/TP/R:R) runs through the identical live code path.
+
+A lightweight sanity check that exercises the BUY/SELL/NO_TRADE scoring
+paths directly (no network, no exchange) lives in `test_wiring.js` — run it
+with `npm run test:wiring` any time you touch `signalEngine.js` or
+`analysis.js`.
+
 ## Next phases (not built yet)
 
-- Backtesting runner against historical exchange candles (`npm run backtest` stub)
 - Auto-trading + risk engine (max daily loss, max drawdown, position sizing) using exchange order endpoints
 - Trade outcome tracking to auto-populate `trade_outcomes` from exchange fills
