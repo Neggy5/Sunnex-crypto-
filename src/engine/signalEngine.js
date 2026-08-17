@@ -23,26 +23,34 @@ const MIN_RR = numEnv('MIN_RR', 1.5);
 const SPREAD_LIMIT_PIPS = numEnv('SPREAD_LIMIT_PIPS', 3);
 
 /**
- * Evaluate one pair on one exchange across its configured timeframes and
- * return a signal (or a NO_TRADE result with the reasoning for why nothing fired).
+ * Build the per-timeframe analysis bundle (trend/S-R/breakout/volatility/
+ * momentum) from a raw candle array. Pure — no I/O — so both the live path
+ * and the backtest runner (src/backtest/run.js) can produce identical
+ * shapes, one from exchange.getCandles(), the other from historical candles
+ * fetched once and sliced into walk-forward windows.
  */
-async function evaluatePair(exchangeName, pair, timeframes) {
-  const price = await exchange.getPrice(exchangeName, pair);
-  const spreadPips = ((price.ask - price.bid) / price.bid) * 10000;
+function buildTfData(candles) {
+  const trend = analysis.detectTrend(candles);
+  const sr = analysis.findSupportResistance(candles);
+  const breakout = analysis.detectBreakout(candles, sr);
+  const volatility = analysis.calcVolatility(candles);
+  const momentum = analysis.calcMomentum(candles);
+  return {
+    trend, sr, breakout, volatility, momentum, candles,
+  };
+}
 
+/**
+ * Pure scoring step: given already-built per-timeframe data and a price,
+ * decide BUY / SELL / NO_TRADE. No exchange calls — this is what makes the
+ * engine backtestable, since the backtest runner can call this directly
+ * with historical candles instead of live ones.
+ */
+function evaluateFromData({
+  exchangeName, pair, timeframes, perTf, price, spreadPips,
+}) {
   if (spreadPips > SPREAD_LIMIT_PIPS) {
     return noTrade(exchangeName, pair, `Spread too wide (${spreadPips.toFixed(1)} pips > ${SPREAD_LIMIT_PIPS})`);
-  }
-
-  const perTf = {};
-  for (const tf of timeframes) {
-    const candles = await exchange.getCandles(exchangeName, pair, tf, 200);
-    const trend = analysis.detectTrend(candles);
-    const sr = analysis.findSupportResistance(candles);
-    const breakout = analysis.detectBreakout(candles, sr);
-    const volatility = analysis.calcVolatility(candles);
-    const momentum = analysis.calcMomentum(candles);
-    perTf[tf] = { trend, sr, breakout, volatility, momentum, candles };
   }
 
   const { score, direction, reasons, scoreDetail } = scoreConfluence(perTf, timeframes);
@@ -74,6 +82,27 @@ async function evaluatePair(exchangeName, pair, timeframes) {
     scoreDetail,
     minSignalScore: MIN_SIGNAL_SCORE,
   };
+}
+
+/**
+ * Evaluate one pair on one exchange across its configured timeframes and
+ * return a signal (or a NO_TRADE result with the reasoning for why nothing fired).
+ * Live path only — fetches current price + candles, then defers to the pure
+ * evaluateFromData() for the actual scoring.
+ */
+async function evaluatePair(exchangeName, pair, timeframes) {
+  const price = await exchange.getPrice(exchangeName, pair);
+  const spreadPips = ((price.ask - price.bid) / price.bid) * 10000;
+
+  const perTf = {};
+  for (const tf of timeframes) {
+    const candles = await exchange.getCandles(exchangeName, pair, tf, 200);
+    perTf[tf] = buildTfData(candles);
+  }
+
+  return evaluateFromData({
+    exchangeName, pair, timeframes, perTf, price, spreadPips,
+  });
 }
 
 function scoreConfluence(perTf, timeframes) {
@@ -200,4 +229,6 @@ function noTrade(exchangeName, pair, reason, scoreDetail = null, score = 0) {
   };
 }
 
-module.exports = { evaluatePair };
+module.exports = {
+  evaluatePair, evaluateFromData, buildTfData, MIN_SIGNAL_SCORE, MIN_RR, SPREAD_LIMIT_PIPS,
+};
