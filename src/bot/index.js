@@ -7,6 +7,7 @@ const exchange = require('../services/exchange');
 const mt5 = require('../services/mt5');
 const signalEngine = require('../engine/signalEngine');
 const logger = require('../utils/logger');
+const { runBacktest } = require('../backtest/run');
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const ADMIN_IDS = (process.env.TELEGRAM_ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -66,6 +67,7 @@ const COMMAND_LIST = [
   { command: 'removepair', description: 'Remove a pair from the watchlist (admin)' },
   { command: 'chart', description: 'TradingView chart link, e.g. /chart BTC/USDT' },
   { command: 'scan', description: 'Run an immediate scan — full detail; add "brief" for a compact one-liner (admin)' },
+  { command: 'backtest', description: 'Test historical candles without placing trades, e.g. /backtest BTC/USDT 300 (admin)' },
   { command: 'pause', description: 'Stop signal scanning (admin)' },
   { command: 'resume', description: 'Resume signal scanning (admin)' },
   { command: 'mt5status', description: 'MT5 connection + account balance (admin)' },
@@ -262,6 +264,37 @@ bot.command('scan', async (ctx) => {
   for (const msg of messages) {
     // eslint-disable-next-line no-await-in-loop
     await ctx.reply(msg);
+  }
+});
+
+bot.command('backtest', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
+
+  const args = ctx.message.text.split(/\s+/).slice(1).filter(Boolean);
+  const pair = args[0] ? (args[0].includes('/') ? args[0].toUpperCase() : `${args[0].toUpperCase()}/USDT`) : (await getWatchlist())[0];
+  const bars = Math.min(1000, Math.max(100, Number(args[1]) || 300));
+  const exchangeName = args[2] || EXCHANGES[0];
+
+  await ctx.reply(`🧪 Backtest mode — ${exchangeName}:${pair}, ${TIMEFRAMES.join('/')} over ${bars} candles. Historical data only; no orders will be placed.`);
+  try {
+    const result = await runBacktest({ exchangeName, pair, timeframes: TIMEFRAMES, bars });
+    const latest = result.signals.at(-1)?.signal;
+    const latestLine = latest
+      ? `\nLatest qualifying: ${latest.direction} ${latest.confidence}% (R:R ${latest.riskReward.toFixed(2)})`
+      : '\nNo qualifying BUY/SELL in the sampled window.';
+    await ctx.reply([
+      `🧪 Backtest complete — ${pair}`,
+      '',
+      `Evaluations: ${result.evaluations}`,
+      `≥70 BUY: ${result.buy70}`,
+      `≥70 SELL: ${result.sell70}`,
+      latestLine,
+      '',
+      'This mode never calls the MT5 order-placement code.',
+    ].join('\n'));
+  } catch (err) {
+    logger.error(`Backtest failed: ${err.message}`);
+    await ctx.reply(`🔴 Backtest failed: ${err.message}`);
   }
 });
 
