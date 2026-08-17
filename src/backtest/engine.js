@@ -51,7 +51,7 @@ function evaluateOutcome(entryCandles, signalIndex, signal) {
 }
 
 async function backtestPair({
-  exchangeName, pair, timeframes, historyCandles, window,
+  exchangeName, pair, timeframes, historyCandles, window, assumedSpreadPips,
 }) {
   logger.info(`Fetching ${historyCandles} historical candles — ${exchangeName}:${pair} across ${timeframes.join(', ')}`);
 
@@ -80,18 +80,21 @@ async function backtestPair({
     }
     if (!haveEnoughHistory) continue;
 
-    // No historical bid/ask spread data exists for a single OHLCV feed, so
-    // this uses the entry-timeframe close as both bid and ask (spreadPips
-    // = 0). That means the live SPREAD_LIMIT_PIPS filter never rejects a
-    // backtest step — a real-time signal could still be filtered by spread
-    // where this backtest wasn't. Everything downstream of that (trend,
-    // breakout, momentum, confluence score, SL/TP/R:R) uses the same logic
-    // as the live engine.
+    // No historical bid/ask feed exists for a single OHLCV series — a real
+    // per-candle spread genuinely isn't recoverable after the fact. Rather
+    // than hardcoding spreadPips=0 (which permanently disables the live
+    // SPREAD_LIMIT_PIPS filter — same code, but a constant that can never
+    // trip it), we run the exact same evaluateFromData() with a configurable
+    // assumed spread (BACKTEST_ASSUMED_SPREAD_PIPS, default 0). That keeps
+    // every code path identical to live; only the input value is a stand-in.
+    // If you want the spread filter meaningfully exercised in the backtest,
+    // set BACKTEST_ASSUMED_SPREAD_PIPS to a realistic typical spread for
+    // the pairs you're testing.
     const closePrice = entryCandles[i].close;
     const price = { bid: closePrice, ask: closePrice };
 
     const result = signalEngine.evaluateFromData({
-      exchangeName, pair, timeframes, perTf, price, spreadPips: 0,
+      exchangeName, pair, timeframes, perTf, price, spreadPips: assumedSpreadPips,
     });
 
     if (result.direction !== 'NO_TRADE') {
@@ -194,7 +197,7 @@ function summarize(allResults, reportMinScore) {
  * script, Telegram /backtest command) decide how to present/store it.
  */
 async function runBacktest({
-  exchanges, pairs, timeframes, historyCandles = 1000, window = 200, reportMinScore = 70,
+  exchanges, pairs, timeframes, historyCandles = 1000, window = 200, reportMinScore = 70, assumedSpreadPips = 0,
 }) {
   const allResults = [];
   const errors = [];
@@ -204,7 +207,7 @@ async function runBacktest({
       try {
         // eslint-disable-next-line no-await-in-loop
         const results = await backtestPair({
-          exchangeName, pair, timeframes, historyCandles, window,
+          exchangeName, pair, timeframes, historyCandles, window, assumedSpreadPips,
         });
         allResults.push(...results);
         logger.info(`${exchangeName}:${pair} — ${results.length} non-NO_TRADE signals across the walk-forward run`);
@@ -219,7 +222,7 @@ async function runBacktest({
 
   return {
     config: {
-      exchanges, pairs, timeframes, historyCandles, window, reportMinScore,
+      exchanges, pairs, timeframes, historyCandles, window, reportMinScore, assumedSpreadPips,
     },
     allResults,
     summary,

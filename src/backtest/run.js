@@ -30,6 +30,10 @@ const WINDOW = Number(process.env.BACKTEST_WINDOW || 200);
 // Deliberately independent of the live MIN_SIGNAL_SCORE env var (which may
 // itself be misconfigured) — this always shows genuine >=70 examples.
 const REPORT_MIN_SCORE = Number(process.env.BACKTEST_MIN_SCORE || 70);
+// See engine.js backtestPair() for why this exists: historical bid/ask
+// spread data doesn't exist for a single OHLCV feed, so this is a
+// stand-in that still exercises the live SPREAD_LIMIT_PIPS filter path.
+const ASSUMED_SPREAD_PIPS = Number(process.env.BACKTEST_ASSUMED_SPREAD_PIPS || 0);
 const MAX_EXAMPLES_PER_DIRECTION = Number(process.env.BACKTEST_MAX_EXAMPLES || 3);
 const OUTPUT_PATH = process.env.BACKTEST_OUTPUT || path.join(__dirname, '../../data/backtest-results.json');
 
@@ -45,6 +49,7 @@ async function main() {
     historyCandles: HISTORY_CANDLES,
     window: WINDOW,
     reportMinScore: REPORT_MIN_SCORE,
+    assumedSpreadPips: ASSUMED_SPREAD_PIPS,
   });
 
   const fmtStats = (s) => [
