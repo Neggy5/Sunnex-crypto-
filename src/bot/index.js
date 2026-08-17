@@ -2,6 +2,7 @@ const { Telegraf, Markup } = require('telegraf');
 const { formatSignal, formatStats } = require('./format');
 const db = require('../db/pool');
 const exchange = require('../services/exchange');
+const mt5 = require('../services/mt5');
 const signalEngine = require('../engine/signalEngine');
 const logger = require('../utils/logger');
 
@@ -11,6 +12,14 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const EXCHANGES = (process.env.EXCHANGES || 'binance,bybit').split(',').map((s) => s.trim());
 const PAIRS = (process.env.PAIRS || 'BTC/USDT,ETH/USDT').split(',').map((s) => s.trim());
 const TIMEFRAMES = (process.env.TIMEFRAMES || '15m,1h').split(',').map((s) => s.trim());
+
+// MT5 live-trading config — all guarded by an explicit /enabletrading gate
+// (bot_state.trading_enabled) that defaults OFF, independent of whether
+// MetaApi credentials are even configured. Nothing places a real order
+// until an admin turns this on explicitly, every single deploy.
+const MT5_LOT_SIZE = Number(process.env.MT5_LOT_SIZE || 0.01);
+const MT5_MAX_OPEN_POSITIONS = Number(process.env.MT5_MAX_OPEN_POSITIONS || 3);
+const MT5_MAX_DAILY_LOSS = Number(process.env.MT5_MAX_DAILY_LOSS || -50); // account currency, negative
 
 function isAdmin(ctx) {
   return ADMIN_IDS.includes(String(ctx.from.id));
@@ -35,6 +44,10 @@ const COMMAND_LIST = [
   { command: 'scan', description: 'Run an immediate scan and show results (admin)' },
   { command: 'pause', description: 'Stop signal scanning (admin)' },
   { command: 'resume', description: 'Resume signal scanning (admin)' },
+  { command: 'mt5status', description: 'MT5 connection + account balance (admin)' },
+  { command: 'positions', description: 'List open MT5 trades (admin)' },
+  { command: 'enabletrading', description: 'Allow real MT5 order placement (admin)' },
+  { command: 'disabletrading', description: 'Block real MT5 order placement (admin)' },
 ];
 
 async function registerCommands() {
@@ -53,7 +66,8 @@ function styledButton(text, callbackData, style) {
 bot.command('start', (ctx) => {
   ctx.reply(
     '⚡ Sunnex Crypto — scans configured pairs for confluence-based BUY/SELL setups '
-    + 'and posts them here. Signals only right now, no auto-trading.\n\n'
+    + 'and posts them here. Real MT5 order placement is available (admin) but stays '
+    + 'off until /enabletrading is sent.\n\n'
     + 'Use the menu button (☰) or type a command below.',
   );
 });
@@ -139,6 +153,56 @@ bot.command('scan', async (ctx) => {
   await ctx.reply(`Scan complete:\n\n${lines.join('\n')}`);
 });
 
+bot.command('mt5status', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
+  if (!mt5.isConfigured()) return ctx.reply('MT5 not configured — set METAAPI_TOKEN and METAAPI_ACCOUNT_ID.');
+
+  const tradingOn = await isTradingEnabled();
+  try {
+    const info = await mt5.getAccountInfo();
+    const openCount = await db.countOpenMt5Trades();
+    const todayPnl = await db.getTodayClosedPnl();
+    await ctx.reply(
+      `MT5 account: ${info.name || info.login}\n`
+      + `Trading: ${tradingOn ? '🟢 enabled' : '🔴 disabled'}\n`
+      + `Balance: ${info.balance} ${info.currency}\n`
+      + `Equity: ${info.equity} ${info.currency}\n`
+      + `Open positions (tracked): ${openCount}/${MT5_MAX_OPEN_POSITIONS}\n`
+      + `Today's closed P&L: ${todayPnl.toFixed(2)} ${info.currency} (cap ${MT5_MAX_DAILY_LOSS})`,
+    );
+  } catch (err) {
+    await ctx.reply(`⚠️ MT5 connection error: ${err.message}`);
+  }
+});
+
+bot.command('positions', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
+  const trades = await db.getOpenMt5Trades();
+  if (!trades.length) return ctx.reply('No open MT5 positions tracked.');
+
+  for (const t of trades) {
+    await ctx.reply(
+      `${t.direction} ${t.lot_size} ${t.mt5_symbol}\n`
+      + `Opened: ${t.open_price ?? 'n/a'} | SL: ${t.stop_loss ?? 'n/a'} | TP: ${t.take_profit ?? 'n/a'}\n`
+      + `Ticket: ${t.ticket}`,
+      Markup.inlineKeyboard([styledButton('❌ Close Position', `mt5:close:${t.id}`, 'danger')]),
+    );
+  }
+});
+
+bot.command('enabletrading', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
+  if (!mt5.isConfigured()) return ctx.reply('MT5 not configured — set METAAPI_TOKEN and METAAPI_ACCOUNT_ID first.');
+  await db.setBotState('trading_enabled', { value: true });
+  await ctx.reply('🟢 Real MT5 order placement ENABLED. "Place Trade" buttons on signals will now execute real orders.');
+});
+
+bot.command('disabletrading', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
+  await db.setBotState('trading_enabled', { value: false });
+  await ctx.reply('🔴 Real MT5 order placement DISABLED.');
+});
+
 bot.command('pause', async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
   await db.setBotState('paused', { value: true });
@@ -204,20 +268,126 @@ bot.action(/^signal:(\d+):(taken|ignored)$/, async (ctx) => {
 
 bot.action('noop', (ctx) => ctx.answerCbQuery());
 
+// Real order placement — every check below runs BEFORE any money moves.
+bot.action(/^mt5:place:(\d+)$/, async (ctx) => {
+  const [, signalId] = ctx.match;
+
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('Not authorized.');
+  if (!(await isTradingEnabled())) {
+    return ctx.answerCbQuery('Trading is disabled — run /enabletrading first.', { show_alert: true });
+  }
+
+  const { rows } = await db.query('SELECT * FROM signals WHERE id = $1', [signalId]);
+  const row = rows[0];
+  if (!row || row.direction === 'NO_TRADE') {
+    return ctx.answerCbQuery('Signal not found or not tradeable.', { show_alert: true });
+  }
+
+  const mt5Symbol = mt5.mapSymbol(row.pair);
+  if (!mt5Symbol) {
+    return ctx.answerCbQuery(`No MT5 symbol mapped for ${row.pair}.`, { show_alert: true });
+  }
+
+  const openCount = await db.countOpenMt5Trades();
+  if (openCount >= MT5_MAX_OPEN_POSITIONS) {
+    return ctx.answerCbQuery(`Max open positions reached (${MT5_MAX_OPEN_POSITIONS}).`, { show_alert: true });
+  }
+
+  const todayPnl = await db.getTodayClosedPnl();
+  if (todayPnl <= MT5_MAX_DAILY_LOSS) {
+    return ctx.answerCbQuery(`Daily loss cap hit (${todayPnl.toFixed(2)} ≤ ${MT5_MAX_DAILY_LOSS}). No new trades today.`, { show_alert: true });
+  }
+
+  await ctx.answerCbQuery('Placing order on MT5…');
+
+  const entry = (row.entry_zone_low + row.entry_zone_high) / 2;
+  const stopDistance = Math.abs(entry - row.stop_loss);
+  const takeDistance = Math.abs(row.take_profit - entry);
+
+  try {
+    const result = await mt5.placeTrade({
+      pair: row.pair,
+      direction: row.direction,
+      lotSize: MT5_LOT_SIZE,
+      stopDistance,
+      takeDistance,
+    });
+
+    await db.insertMt5Trade({
+      signalId: row.id,
+      ticket: result.ticket,
+      mt5Symbol: result.mt5Symbol,
+      direction: row.direction,
+      lotSize: MT5_LOT_SIZE,
+      openPrice: result.openPrice,
+      stopLoss: result.stopLoss,
+      takeProfit: result.takeProfit,
+      openedBy: String(ctx.from.id),
+    });
+
+    await ctx.editMessageReplyMarkup(
+      Markup.inlineKeyboard([styledButton('✅ Trade Placed', 'noop', 'success')]).reply_markup,
+    );
+    await ctx.reply(
+      `📈 Order placed: ${row.direction} ${MT5_LOT_SIZE} ${result.mt5Symbol}\n`
+      + `Fill: ~${result.openPrice}\nSL: ${result.stopLoss}\nTP: ${result.takeProfit}\n`
+      + `Ticket: ${result.ticket}`,
+    );
+  } catch (err) {
+    logger.error(`MT5 place trade failed: ${err.message}`);
+    await ctx.reply(`⚠️ Order failed: ${err.message}`);
+  }
+});
+
+// Closing a position from /positions
+bot.action(/^mt5:close:(\d+)$/, async (ctx) => {
+  const [, tradeRowId] = ctx.match;
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('Not authorized.');
+
+  const { rows } = await db.query('SELECT * FROM mt5_trades WHERE id = $1', [tradeRowId]);
+  const trade = rows[0];
+  if (!trade || trade.status !== 'open') {
+    return ctx.answerCbQuery('Trade not found or already closed.', { show_alert: true });
+  }
+
+  await ctx.answerCbQuery('Closing position…');
+  try {
+    const result = await mt5.closePosition(trade.ticket);
+    const pnl = result?.profit ?? 0;
+    await db.closeMt5Trade(trade.id, pnl);
+    await ctx.editMessageReplyMarkup(
+      Markup.inlineKeyboard([styledButton(`✅ Closed (${pnl.toFixed(2)})`, 'noop')]).reply_markup,
+    );
+  } catch (err) {
+    logger.error(`MT5 close position failed: ${err.message}`);
+    await ctx.reply(`⚠️ Close failed: ${err.message}`);
+  }
+});
+
 async function pushSignal(signal) {
   const id = await db.insertSignal(signal);
   const text = formatSignal(signal);
   if (!text) return; // NO_TRADE, nothing to send
 
-  await bot.telegram.sendMessage(CHAT_ID, text, Markup.inlineKeyboard([
+  const buttons = [
     styledButton('✅ Mark Taken', `signal:${id}:taken`, 'success'),
     styledButton('❌ Ignore', `signal:${id}:ignored`, 'danger'),
-  ]));
+  ];
+  if (mt5.isConfigured() && mt5.mapSymbol(signal.pair)) {
+    buttons.push(styledButton('📈 Place Trade (MT5)', `mt5:place:${id}`));
+  }
+
+  await bot.telegram.sendMessage(CHAT_ID, text, Markup.inlineKeyboard(buttons));
   logger.info(`Signal #${id} sent for ${signal.pair}`);
 }
 
 async function isPaused() {
   const state = await db.getBotState('paused', { value: false });
+  return state.value === true;
+}
+
+async function isTradingEnabled() {
+  const state = await db.getBotState('trading_enabled', { value: false });
   return state.value === true;
 }
 
@@ -228,5 +398,5 @@ async function recordScan(pairsScanned, signalsFired) {
 }
 
 module.exports = {
-  bot, pushSignal, isPaused, registerCommands, recordScan,
+  bot, pushSignal, isPaused, isTradingEnabled, registerCommands, recordScan,
 };
