@@ -22,8 +22,11 @@ app.get('/health', async (req, res) => {
 async function main() {
   app.listen(PORT, () => logger.info(`Health check listening on :${PORT}`));
 
-  await bot.launch();
+  // registerCommands() must run BEFORE bot.launch() — launch() blocks
+  // forever (by design, to keep the polling loop alive) so anything
+  // awaited after it never runs.
   await registerCommands();
+  bot.launch().catch((err) => logger.error(`Bot launch error: ${err.message}`));
   logger.info('Sunnex Crypto bot launched');
 
   scanner.start();

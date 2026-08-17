@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const signalEngine = require('./engine/signalEngine');
-const { pushSignal, isPaused } = require('./bot/index');
+const { pushSignal, isPaused, recordScan } = require('./bot/index');
 const logger = require('./utils/logger');
 
 const EXCHANGES = (process.env.EXCHANGES || 'binance,bybit').split(',').map((s) => s.trim());
@@ -13,16 +13,19 @@ async function scanOnce() {
     return;
   }
 
+  let signalsFired = 0;
   for (const exchangeName of EXCHANGES) {
     for (const pair of PAIRS) {
       try {
         const signal = await signalEngine.evaluatePair(exchangeName, pair, TIMEFRAMES);
+        if (signal.direction !== 'NO_TRADE') signalsFired += 1;
         await pushSignal(signal);
       } catch (err) {
         logger.error(`Scan failed for ${exchangeName}:${pair}: ${err.message}`);
       }
     }
   }
+  await recordScan(EXCHANGES.length * PAIRS.length, signalsFired);
 }
 
 function start() {
