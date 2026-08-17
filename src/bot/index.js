@@ -30,6 +30,7 @@ const COMMAND_LIST = [
   { command: 'start', description: 'Show what this bot does' },
   { command: 'menu', description: 'Show this command list' },
   { command: 'status', description: 'Bot + exchange connection status' },
+  { command: 'price', description: 'Live prices (all pairs, or e.g. /price BTC/USDT)' },
   { command: 'stats', description: 'Win rate and net pips (optionally: /stats 7)' },
   { command: 'scan', description: 'Run an immediate scan and show results (admin)' },
   { command: 'pause', description: 'Stop signal scanning (admin)' },
@@ -80,6 +81,28 @@ bot.command('status', async (ctx) => {
       styledButton('🔄 Refresh', 'status:refresh'),
     ]),
   );
+});
+
+bot.command('price', async (ctx) => {
+  const arg = ctx.message.text.split(' ')[1]?.toUpperCase();
+  const requestedPair = arg ? (arg.includes('/') ? arg : `${arg}/USDT`) : null;
+  const pairsToFetch = requestedPair ? [requestedPair] : PAIRS;
+
+  const rows = [];
+  for (const pair of pairsToFetch) {
+    for (const exchangeName of EXCHANGES) {
+      try {
+        const { bid, ask } = await exchange.getPrice(exchangeName, pair);
+        const mid = (bid + ask) / 2;
+        rows.push(`${exchangeName}: ${pair} — ${mid.toFixed(mid < 10 ? 5 : 2)} (bid ${bid} / ask ${ask})`);
+      } catch (err) {
+        rows.push(`${exchangeName}: ${pair} — unavailable (${err.message})`);
+      }
+    }
+  }
+
+  if (!rows.length) return ctx.reply(`No price data for ${requestedPair || 'configured pairs'}.`);
+  await ctx.reply(`💹 Live prices\n\n${rows.join('\n')}`);
 });
 
 bot.command('stats', async (ctx) => {
