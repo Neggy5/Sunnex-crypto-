@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS signals (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     exchange        TEXT NOT NULL,
     pair            TEXT NOT NULL,
-    timeframe       TEXT NOT NULL,
+    timeframe       TEXT,
     direction       TEXT NOT NULL CHECK (direction IN ('BUY', 'SELL', 'NO_TRADE')),
     confidence      REAL NOT NULL,
     entry_zone_low  REAL,

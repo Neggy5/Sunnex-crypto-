@@ -40,6 +40,10 @@ async function insertSignal(signal) {
     riskReward, reasoning, marketContext,
   } = signal;
 
+  // node:sqlite (unlike better-sqlite3) throws on `undefined` bind params —
+  // NO_TRADE results only set a few fields, so coerce everything to null.
+  const n = (v) => (v === undefined ? null : v);
+
   const stmt = db.prepare(
     `INSERT INTO signals
       (exchange, pair, timeframe, direction, confidence, entry_zone_low, entry_zone_high,
@@ -47,8 +51,8 @@ async function insertSignal(signal) {
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const info = stmt.run(
-    exchange, pair, timeframe, direction, confidence, entryZoneLow, entryZoneHigh,
-    stopLoss, takeProfit, riskReward, reasoning,
+    n(exchange), n(pair), n(timeframe), n(direction), n(confidence), n(entryZoneLow), n(entryZoneHigh),
+    n(stopLoss), n(takeProfit), n(riskReward), n(reasoning),
     marketContext !== undefined ? JSON.stringify(marketContext) : null,
   );
   return info.lastInsertRowid;
