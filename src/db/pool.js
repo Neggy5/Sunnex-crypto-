@@ -131,11 +131,29 @@ async function getTodayClosedPnl() {
   return row.total;
 }
 
+async function getPairLeaderboard(sinceDays = 30) {
+  return db.prepare(
+    `SELECT
+        s.pair,
+        COUNT(*) FILTER (WHERE s.direction != 'NO_TRADE') AS total_signals,
+        COUNT(*) FILTER (WHERE o.result = 'win') AS wins,
+        COUNT(*) FILTER (WHERE o.result = 'loss') AS losses,
+        COALESCE(SUM(o.pnl_pips), 0) AS net_pips
+     FROM signals s
+     LEFT JOIN trade_outcomes o ON o.signal_id = s.id
+     WHERE s.created_at > datetime('now', '-' || ? || ' days')
+     GROUP BY s.pair
+     HAVING total_signals > 0
+     ORDER BY net_pips DESC`,
+  ).all(sinceDays);
+}
+
 module.exports = {
   db,
   query,
   insertSignal,
   getStats,
+  getPairLeaderboard,
   setBotState,
   getBotState,
   insertMt5Trade,
