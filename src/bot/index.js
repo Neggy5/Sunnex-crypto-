@@ -280,6 +280,10 @@ const BACKTEST_TELEGRAM_WINDOW = Number(process.env.BACKTEST_WINDOW || 200);
 // engine.js backtestPair() for why. Shared env var so both entry points
 // stay configured identically.
 const BACKTEST_ASSUMED_SPREAD_PIPS = Number(process.env.BACKTEST_ASSUMED_SPREAD_PIPS || 0);
+// Same fee/slippage assumptions as the CLI backtest — see run.js for
+// rationale. Shared env vars so both entry points stay configured identically.
+const BACKTEST_FEE_PCT_PER_SIDE = Number(process.env.BACKTEST_FEE_PCT_PER_SIDE ?? 0.1);
+const BACKTEST_SLIPPAGE_PCT_PER_SIDE = Number(process.env.BACKTEST_SLIPPAGE_PCT_PER_SIDE ?? 0.05);
 let backtestRunning = false;
 
 bot.command('backtest', async (ctx) => {
@@ -309,6 +313,8 @@ bot.command('backtest', async (ctx) => {
       window: BACKTEST_TELEGRAM_WINDOW,
       reportMinScore: minScore,
       assumedSpreadPips: BACKTEST_ASSUMED_SPREAD_PIPS,
+      feePctPerSide: BACKTEST_FEE_PCT_PER_SIDE,
+      slippagePctPerSide: BACKTEST_SLIPPAGE_PCT_PER_SIDE,
     });
 
     const headerLine = `Backtest complete — ${pair}: ${summary.totalSignals} signal(s) fired `
