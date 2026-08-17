@@ -50,14 +50,71 @@ async function getPrice(exchangeName, pair) {
   }
 }
 
+function mapCandles(ohlcv) {
+  return ohlcv.map(([time, open, high, low, close, volume]) => ({
+    time, open, high, low, close, volume,
+  }));
+}
+
+// ms per candle, used to paginate backward far enough for large historical
+// pulls. Only the timeframes this bot uses need entries here.
+const TF_MS = {
+  '1m': 60000,
+  '5m': 300000,
+  '15m': 900000,
+  '30m': 1800000,
+  '1h': 3600000,
+  '4h': 14400000,
+  '1d': 86400000,
+};
+
+// Most exchanges cap a single fetchOHLCV call around 1000-1500 candles, so
+// pulling months of history (backtest) needs multiple paginated calls
+// walking forward in time from `since`. The live scanner's normal calls
+// (count=200) stay on the single-call fast path below — this only kicks in
+// for the larger counts a backtest asks for.
+const PAGINATION_THRESHOLD = 1000;
+const PAGE_SIZE = 1000;
+
+async function fetchPaginated(client, pair, tf, count) {
+  const msPerCandle = TF_MS[tf];
+  if (!msPerCandle) {
+    // Unknown timeframe string — fall back to whatever the exchange gives
+    // us in one call rather than guessing at ms-per-candle math.
+    const ohlcv = await client.fetchOHLCV(pair, tf, undefined, count);
+    return mapCandles(ohlcv);
+  }
+
+  let since = Date.now() - count * msPerCandle;
+  let all = [];
+
+  while (all.length < count) {
+    // eslint-disable-next-line no-await-in-loop
+    const batch = await client.fetchOHLCV(pair, tf, since, PAGE_SIZE);
+    if (!batch.length) break;
+
+    all = all.concat(batch);
+    const lastTime = batch[batch.length - 1][0];
+    if (lastTime < since) break; // no forward progress — avoid an infinite loop
+    since = lastTime + msPerCandle;
+    if (batch.length < PAGE_SIZE) break; // exchange ran out of history (caught up to "now")
+  }
+
+  return mapCandles(all).slice(-count);
+}
+
 async function getCandles(exchangeName, pair, timeframe, count = 200) {
   try {
     const client = getClient(exchangeName);
     await ensureMarketsLoaded(client, exchangeName);
-    const ohlcv = await client.fetchOHLCV(pair, normalizeTf(timeframe), undefined, count);
-    return ohlcv.map(([time, open, high, low, close, volume]) => ({
-      time, open, high, low, close, volume,
-    }));
+    const tf = normalizeTf(timeframe);
+
+    if (count <= PAGINATION_THRESHOLD) {
+      const ohlcv = await client.fetchOHLCV(pair, tf, undefined, count);
+      return mapCandles(ohlcv);
+    }
+
+    return await fetchPaginated(client, pair, tf, count);
   } catch (err) {
     logger.error(`exchange.getCandles(${exchangeName}, ${pair}, ${timeframe}) failed: ${err.message}`);
     throw err;
