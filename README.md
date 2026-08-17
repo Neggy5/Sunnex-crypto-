@@ -14,7 +14,8 @@ This bot (Railway, Node.js)
    ├── exchange client (src/services/exchange.js) — unified multi-exchange interface
    ├── analysis engine (trend/S&R/breakout)
    ├── signal scoring
-   ├── SQLite (signals + journal, local file — no external DB service)
+   ├── SQLite via Node's built-in `node:sqlite` (signals + journal, local
+   │   file — no external DB service, no native build step)
    └── Telegraf → Telegram channel/group
 ```
 
@@ -34,9 +35,11 @@ to `EXCHANGES` in `.env`, no code changes needed as long as ccxt supports it.
 2. `npm install`
 3. `npm run dev` locally, or push to Railway.
 
-The database is a local SQLite file. The schema (`src/db/schema.sql`) is
-applied automatically on startup — no manual migration step, no external DB
-service to provision.
+The database is a local SQLite file via Node's built-in `node:sqlite` module
+(no `better-sqlite3`, so no native compilation at build time — this avoids
+Railway build failures from missing Python/build tools). The schema
+(`src/db/schema.sql`) is applied automatically on startup — no manual
+migration step, no external DB service to provision. Requires Node ≥22.5.
 
 ## Telegram commands
 
