@@ -3,6 +3,7 @@ const express = require('express');
 const { bot, registerCommands } = require('./bot/index');
 const scanner = require('./scanner');
 const exchange = require('./services/exchange');
+const mt5 = require('./services/mt5');
 const logger = require('./utils/logger');
 
 const app = express();
@@ -28,6 +29,17 @@ async function main() {
   await registerCommands();
   bot.launch().catch((err) => logger.error(`Bot launch error: ${err.message}`));
   logger.info('Sunnex Crypto bot launched');
+
+  // MT5 connects in the background — takes several seconds and shouldn't
+  // block the bot from responding to Telegram in the meantime. Trading
+  // stays gated behind /enabletrading regardless of connection state.
+  if (mt5.isConfigured()) {
+    mt5.connect()
+      .then(() => logger.info('MT5 connected.'))
+      .catch((err) => logger.error(`MT5 connection failed at startup: ${err.message}`));
+  } else {
+    logger.info('MT5 not configured — live trading features disabled.');
+  }
 
   scanner.start();
 
