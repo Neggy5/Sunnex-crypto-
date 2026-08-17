@@ -14,6 +14,42 @@ function sliceAsOf(candles, asOfTime, window) {
   return candles.slice(start, end);
 }
 
+/**
+ * Walk forward from the bar AFTER the signal was generated (signalIndex + 1)
+ * to see whether price hits takeProfit or stopLoss first. This intentionally
+ * uses "future" candles relative to the signal — that's not look-ahead bias,
+ * it's the whole point of a backtest: the signal itself was built using only
+ * data available as of signalIndex (see sliceAsOf above), and we're now
+ * simulating what happened to a trade taken at that moment. Look-ahead bias
+ * would be using these future candles to help decide direction/entry/SL/TP —
+ * this function never touches those, it only reads outcome.
+ */
+function evaluateOutcome(entryCandles, signalIndex, signal) {
+  const { direction, stopLoss, takeProfit } = signal;
+
+  for (let j = signalIndex + 1; j < entryCandles.length; j += 1) {
+    const c = entryCandles[j];
+    const hitTP = direction === 'BUY' ? c.high >= takeProfit : c.low <= takeProfit;
+    const hitSL = direction === 'BUY' ? c.low <= stopLoss : c.high >= stopLoss;
+
+    if (hitTP && hitSL) {
+      // Both levels were touched within the same candle. OHLC data alone
+      // can't tell us which happened first intra-candle, so we assume SL
+      // first — the conservative assumption that doesn't overstate results.
+      return {
+        outcome: 'SL', exitTime: c.time, barsHeld: j - signalIndex, ambiguous: true,
+      };
+    }
+    if (hitTP) return { outcome: 'TP', exitTime: c.time, barsHeld: j - signalIndex, ambiguous: false };
+    if (hitSL) return { outcome: 'SL', exitTime: c.time, barsHeld: j - signalIndex, ambiguous: false };
+  }
+
+  // Ran out of history before either level was reached.
+  return {
+    outcome: 'OPEN', exitTime: null, barsHeld: entryCandles.length - 1 - signalIndex, ambiguous: false,
+  };
+}
+
 async function backtestPair({
   exchangeName, pair, timeframes, historyCandles, window,
 }) {
@@ -59,11 +95,73 @@ async function backtestPair({
     });
 
     if (result.direction !== 'NO_TRADE') {
-      results.push({ ...result, backtestTime: new Date(asOfTime).toISOString() });
+      const { outcome, exitTime, barsHeld, ambiguous } = evaluateOutcome(entryCandles, i, result);
+      const pnlR = outcome === 'TP' ? result.riskReward : (outcome === 'SL' ? -1 : null);
+
+      results.push({
+        ...result,
+        backtestTime: new Date(asOfTime).toISOString(),
+        outcome, // 'TP' | 'SL' | 'OPEN'
+        exitTime: exitTime ? new Date(exitTime).toISOString() : null,
+        barsHeld,
+        pnlR, // in R-multiples: +riskReward on TP, -1 on SL, null if still OPEN
+        outcomeAmbiguous: ambiguous,
+      });
     }
   }
 
   return results;
+}
+
+/**
+ * Aggregate trade-level stats from a set of already-evaluated signals.
+ * Trades are sorted chronologically by backtestTime so win-rate, P/L, and
+ * drawdown reflect the order signals actually fired in, even though the
+ * caller may hand us results concatenated across multiple pairs/exchanges.
+ *
+ * Note on maxDrawdown: this models a simple sequential equity curve —
+ * one unit of risk (1R) per trade, applied in signal order — not real
+ * position sizing or concurrent/overlapping open trades. Treat it as a
+ * relative measure of how streaky the strategy's losses are, not a claim
+ * about actual account drawdown.
+ */
+function computeTradeStats(trades) {
+  const sorted = [...trades].sort((a, b) => a.backtestTime.localeCompare(b.backtestTime));
+  const decided = sorted.filter((t) => t.outcome === 'TP' || t.outcome === 'SL');
+  const wins = decided.filter((t) => t.outcome === 'TP');
+  const losses = decided.filter((t) => t.outcome === 'SL');
+  const openTrades = sorted.length - decided.length;
+
+  const totalPL = decided.reduce((sum, t) => sum + t.pnlR, 0);
+  const winRate = decided.length ? (wins.length / decided.length) * 100 : null;
+
+  // Average PLANNED R:R at entry across every signal taken (win, loss, or
+  // still open) — this is the setup's risk:reward ratio, not the realized
+  // outcome (that's totalPL/winRate above).
+  const avgRR = sorted.length
+    ? sorted.reduce((sum, t) => sum + t.riskReward, 0) / sorted.length
+    : null;
+
+  let peak = 0;
+  let cum = 0;
+  let maxDrawdown = 0;
+  decided.forEach((t) => {
+    cum += t.pnlR;
+    if (cum > peak) peak = cum;
+    maxDrawdown = Math.max(maxDrawdown, peak - cum);
+  });
+
+  return {
+    totalTrades: decided.length,
+    openTrades,
+    wins: wins.length,
+    losses: losses.length,
+    winRate,
+    totalPL,
+    avgRR,
+    maxDrawdown,
+    trades: sorted,
+  };
 }
 
 function summarize(allResults, reportMinScore) {
@@ -73,6 +171,7 @@ function summarize(allResults, reportMinScore) {
     .sort((a, b) => b.confidence - a.confidence);
   const qualifyingSell = sell.filter((r) => r.confidence >= reportMinScore)
     .sort((a, b) => b.confidence - a.confidence);
+  const qualifying = allResults.filter((r) => r.confidence >= reportMinScore);
 
   return {
     totalSignals: allResults.length,
@@ -80,6 +179,11 @@ function summarize(allResults, reportMinScore) {
     sellCount: sell.length,
     qualifyingBuy,
     qualifyingSell,
+    // Stats over every signal the engine fired, regardless of score.
+    statsAll: computeTradeStats(allResults),
+    // Stats over only signals that clear reportMinScore — this is the set
+    // that matters, since it's what the live bot would actually have sent.
+    statsQualifying: computeTradeStats(qualifying),
   };
 }
 
@@ -123,4 +227,6 @@ async function runBacktest({
   };
 }
 
-module.exports = { runBacktest, sliceAsOf };
+module.exports = {
+  runBacktest, sliceAsOf, evaluateOutcome, computeTradeStats,
+};

@@ -47,10 +47,34 @@ async function main() {
     reportMinScore: REPORT_MIN_SCORE,
   });
 
+  const fmtStats = (s) => [
+    `  Total closed trades: ${s.totalTrades}  (still OPEN at end of history: ${s.openTrades})`,
+    `  Wins / Losses: ${s.wins} / ${s.losses}`,
+    `  Win rate: ${s.winRate === null ? 'n/a' : `${s.winRate.toFixed(1)}%`}`,
+    `  Total P/L: ${s.totalPL === null ? 'n/a' : `${s.totalPL >= 0 ? '+' : ''}${s.totalPL.toFixed(2)}R`}`,
+    `  Average R:R (planned): ${s.avgRR === null ? 'n/a' : s.avgRR.toFixed(2)}`,
+    `  Max drawdown: ${s.maxDrawdown.toFixed(2)}R`,
+  ].join('\n');
+
   console.log('\n=========== BACKTEST SUMMARY ===========');
   console.log(`Total signals fired (any confidence): ${summary.totalSignals}  (BUY ${summary.buyCount} / SELL ${summary.sellCount})`);
   console.log(`Qualifying at >=${REPORT_MIN_SCORE}: BUY ${summary.qualifyingBuy.length} / SELL ${summary.qualifyingSell.length}`);
+  console.log('\n--- Stats: ALL signals (any confidence) ---');
+  console.log(fmtStats(summary.statsAll));
+  console.log(`\n--- Stats: QUALIFYING signals only (>=${REPORT_MIN_SCORE}) ---`);
+  console.log(fmtStats(summary.statsQualifying));
+  console.log('\nP/L and drawdown are in R-multiples (multiples of risk), not pips —');
+  console.log('deliberately asset-agnostic so crypto and forex pairs are comparable.');
   console.log('=========================================\n');
+
+  console.log('--- Individual signal outcomes (qualifying set, chronological) ---\n');
+  summary.statsQualifying.trades.forEach((t) => {
+    const outcomeTag = t.outcome === 'TP' ? '✅ TP HIT' : (t.outcome === 'SL' ? '❌ SL HIT' : '⏳ OPEN (ran out of history)');
+    const pnl = t.pnlR === null ? '' : `  |  P/L: ${t.pnlR >= 0 ? '+' : ''}${t.pnlR.toFixed(2)}R`;
+    const ambiguousTag = t.outcomeAmbiguous ? '  [TP & SL both touched same candle — assumed SL first]' : '';
+    console.log(`[${t.backtestTime}] ${t.direction} ${t.pair} (${t.exchange}) conf=${t.confidence}% R:R=${t.riskReward.toFixed(2)} -> ${outcomeTag}${pnl}  (${t.barsHeld} bars)${ambiguousTag}`);
+  });
+  console.log('');
 
   if (!summary.qualifyingBuy.length && !summary.qualifyingSell.length) {
     console.log(`No signal in this history cleared >=${REPORT_MIN_SCORE} confidence in either direction.`);
@@ -85,7 +109,27 @@ async function main() {
     summary: {
       totalSignals: summary.totalSignals, buyCount: summary.buyCount, sellCount: summary.sellCount,
     },
-    allSignals: allResults,
+    statsAll: {
+      totalTrades: summary.statsAll.totalTrades,
+      openTrades: summary.statsAll.openTrades,
+      wins: summary.statsAll.wins,
+      losses: summary.statsAll.losses,
+      winRate: summary.statsAll.winRate,
+      totalPL: summary.statsAll.totalPL,
+      avgRR: summary.statsAll.avgRR,
+      maxDrawdown: summary.statsAll.maxDrawdown,
+    },
+    statsQualifying: {
+      totalTrades: summary.statsQualifying.totalTrades,
+      openTrades: summary.statsQualifying.openTrades,
+      wins: summary.statsQualifying.wins,
+      losses: summary.statsQualifying.losses,
+      winRate: summary.statsQualifying.winRate,
+      totalPL: summary.statsQualifying.totalPL,
+      avgRR: summary.statsQualifying.avgRR,
+      maxDrawdown: summary.statsQualifying.maxDrawdown,
+    },
+    allSignals: allResults, // each entry now includes outcome, exitTime, barsHeld, pnlR
   }, null, 2));
   logger.info(`Full results written to ${OUTPUT_PATH}`);
 }
