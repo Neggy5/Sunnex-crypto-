@@ -6,6 +6,7 @@ const db = require('../db/pool');
 const exchange = require('../services/exchange');
 const mt5 = require('../services/mt5');
 const signalEngine = require('../engine/signalEngine');
+const { runBacktest } = require('../backtest/engine');
 const logger = require('../utils/logger');
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
@@ -66,6 +67,9 @@ const COMMAND_LIST = [
   { command: 'removepair', description: 'Remove a pair from the watchlist (admin)' },
   { command: 'chart', description: 'TradingView chart link, e.g. /chart BTC/USDT' },
   { command: 'scan', description: 'Run an immediate scan — full detail; add "brief" for a compact one-liner (admin)' },
+  {
+    command: 'backtest', description: 'Walk historical candles through the engine to see example >=score BUY/SELL signals — no trade placed (admin). Usage: /backtest [PAIR] [MINSCORE]',
+  },
   { command: 'pause', description: 'Stop signal scanning (admin)' },
   { command: 'resume', description: 'Resume signal scanning (admin)' },
   { command: 'mt5status', description: 'MT5 connection + account balance (admin)' },
@@ -262,6 +266,73 @@ bot.command('scan', async (ctx) => {
   for (const msg of messages) {
     // eslint-disable-next-line no-await-in-loop
     await ctx.reply(msg);
+  }
+});
+
+// Historical-candle backtest, runnable straight from the chat — no order
+// placed, no live signal posted, no DB write. Scoped to one pair per run
+// (defaults to the first watchlist pair) and a smaller candle count than
+// `npm run backtest`'s default, since this runs synchronously inside a
+// Telegram command and an admin is waiting on the reply.
+const BACKTEST_TELEGRAM_CANDLES = Number(process.env.BACKTEST_TELEGRAM_CANDLES || 500);
+const BACKTEST_TELEGRAM_WINDOW = Number(process.env.BACKTEST_WINDOW || 200);
+let backtestRunning = false;
+
+bot.command('backtest', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('Not authorized.');
+  if (backtestRunning) return ctx.reply('A backtest is already running — wait for it to finish before starting another.');
+
+  const args = ctx.message.text.split(' ').slice(1);
+  const pairArg = args[0]?.toUpperCase();
+  const pair = pairArg ? (pairArg.includes('/') ? pairArg : `${pairArg}/USDT`) : (await getWatchlist())[0];
+  const minScore = Number(args[1]) || 70;
+
+  if (!pair) return ctx.reply('No pair to backtest — watchlist is empty and none was given. Usage: /backtest [PAIR] [MINSCORE]');
+
+  backtestRunning = true;
+  await ctx.reply(
+    `📜 Backtesting ${pair} on ${EXCHANGES.join(', ')} — ${BACKTEST_TELEGRAM_CANDLES} historical candles/timeframe `
+    + `across ${TIMEFRAMES.join(', ')}, looking for >=${minScore} confidence. This hits the exchange for real `
+    + 'historical data (read-only) and can take 10-30s…',
+  );
+
+  try {
+    const { summary } = await runBacktest({
+      exchanges: EXCHANGES,
+      pairs: [pair],
+      timeframes: TIMEFRAMES,
+      historyCandles: BACKTEST_TELEGRAM_CANDLES,
+      window: BACKTEST_TELEGRAM_WINDOW,
+      reportMinScore: minScore,
+    });
+
+    const headerLine = `Backtest complete — ${pair}: ${summary.totalSignals} signal(s) fired `
+      + `(BUY ${summary.buyCount} / SELL ${summary.sellCount}) across the walk-forward run. `
+      + `Qualifying at >=${minScore}: BUY ${summary.qualifyingBuy.length} / SELL ${summary.qualifyingSell.length}.`;
+
+    if (!summary.qualifyingBuy.length && !summary.qualifyingSell.length) {
+      await ctx.reply(
+        `${headerLine}\n\nNo example cleared >=${minScore} in this window — often a legitimate result (conflicting `
+        + 'timeframes cap the score), not a bug. Try a different pair, a lower MINSCORE, or `npm run backtest` '
+        + 'locally with more history.',
+      );
+      return;
+    }
+
+    const blocks = [];
+    summary.qualifyingBuy.slice(0, 2).forEach((sig) => blocks.push(`[as of ${sig.backtestTime}]\n${formatScanBlock(sig)}`));
+    summary.qualifyingSell.slice(0, 2).forEach((sig) => blocks.push(`[as of ${sig.backtestTime}]\n${formatScanBlock(sig)}`));
+
+    const messages = packIntoChunks(headerLine, blocks, 3500);
+    for (const msg of messages) {
+      // eslint-disable-next-line no-await-in-loop
+      await ctx.reply(msg);
+    }
+  } catch (err) {
+    logger.error(`Telegram /backtest failed: ${err.message}`);
+    await ctx.reply(`⚠️ Backtest failed: ${err.message}`);
+  } finally {
+    backtestRunning = false;
   }
 });
 
